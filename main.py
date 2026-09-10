@@ -33,23 +33,24 @@ REQUEST_HEADERS = {
 # --- TRMNL payload size safety -----------------------------------------
 # TRMNL webhook payloads are capped at 2KB (standard) / 5KB (TRMNL+). We
 # target a conservative budget below the 5KB hard limit to leave headroom
-# for JSON quoting/escaping overhead, and escalate simplification/precision
+# for JSON quoting/escaping overhead, and escalate simplification
 # automatically (see build_payload_within_budget) until the payload fits.
 SIZE_BUDGET_BYTES = 4500
 
-# (min_delta degrees, polyline precision) pairs, tried in order from
-# "highest detail" to "most aggressive", until the encoded payload fits
-# SIZE_BUDGET_BYTES. precision=4 ~= 11m resolution, precision=3 ~= 111m —
-# both are finer than a single pixel on a city-wide e-ink map, so dropping
-# precision before it becomes visually obvious is a safe first move.
-ENCODING_ESCALATION = [
-    (0.0012, 4),
-    (0.0025, 4),
-    (0.005, 4),
-    (0.005, 3),
-    (0.01, 3),
-    (0.02, 3),
-]
+# Polyline coordinate precision is fixed at 5 decimal places (the standard
+# Google/Strava/Mapbox default, ~1m resolution) and MUST NOT be changed.
+# The HTML template's TRMNLMaps.decodePolyline() is an opaque library
+# function with no way to tell it which precision was used to encode — it
+# assumes the standard precision of 5. Encoding at a different precision
+# silently produces coordinates that are 10x/100x off, which places every
+# route point far outside the visible map (looks like "no routes drawn").
+# So payload size is controlled ONLY via simplification aggressiveness
+# below, never via precision.
+POLYLINE_PRECISION = 5
+
+# min_delta values (degrees), tried in order from "highest detail" to
+# "most aggressive", until the encoded payload fits SIZE_BUDGET_BYTES.
+ENCODING_ESCALATION = [0.0008, 0.0015, 0.003, 0.006, 0.012, 0.025, 0.05]
 
 # Raw city registry: "City Name": (longitude, latitude, radius_km, [optional_custom_tags])
 # Radius determines both the spatial bounding box and the auto-calculated map zoom.
@@ -259,7 +260,7 @@ def _encode_signed_number(value):
     return "".join(chunks)
 
 
-def encode_polyline(lat_lon_pairs, precision=4):
+def encode_polyline(lat_lon_pairs, precision=POLYLINE_PRECISION):
     factor = 10 ** precision
     out = []
     prev_lat = 0
@@ -377,14 +378,14 @@ def extract_relation_chains(overpass_data):
     return chains, round(total_km, 1), len(unique_lines)
 
 
-def encode_chains(chains, min_delta, precision):
+def encode_chains(chains, min_delta):
     encoded = []
     for chain in chains:
         simplified = simplify_line(chain, min_delta=min_delta)
         if len(simplified) < 2:
             continue
         lat_lon_pairs = [(pt[1], pt[0]) for pt in simplified]
-        encoded.append(encode_polyline(lat_lon_pairs, precision=precision))
+        encoded.append(encode_polyline(lat_lon_pairs, precision=POLYLINE_PRECISION))
     return ";".join(encoded)
 
 
@@ -412,9 +413,9 @@ def build_payload_within_budget(city_name, city_data, main_chains, main_km, main
     last_payload = None
     last_size = None
 
-    for min_delta, precision in ENCODING_ESCALATION:
-        map_data = encode_chains(main_chains, min_delta, precision)
-        map_data_tram = encode_chains(tram_chains, min_delta, precision)
+    for min_delta in ENCODING_ESCALATION:
+        map_data = encode_chains(main_chains, min_delta)
+        map_data_tram = encode_chains(tram_chains, min_delta)
 
         payload = {
             "merge_variables": {
@@ -435,10 +436,10 @@ def build_payload_within_budget(city_name, city_data, main_chains, main_km, main
         last_payload, last_size = payload, size
 
         if size <= SIZE_BUDGET_BYTES:
-            print(f"Payload fits budget at min_delta={min_delta}, precision={precision}: {size} bytes")
+            print(f"Payload fits budget at min_delta={min_delta}: {size} bytes")
             return payload, size
 
-        print(f"Payload too large at min_delta={min_delta}, precision={precision}: {size} bytes, escalating...")
+        print(f"Payload too large at min_delta={min_delta}: {size} bytes, escalating...")
 
     print(
         f"WARNING: payload still {last_size} bytes after maximum simplification "
