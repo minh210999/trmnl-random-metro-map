@@ -52,6 +52,17 @@ POLYLINE_PRECISION = 5
 # "most aggressive", until the encoded payload fits SIZE_BUDGET_BYTES.
 ENCODING_ESCALATION = [0.0008, 0.0015, 0.003, 0.006, 0.012, 0.025, 0.05]
 
+# Tolerance (degrees) used to decide whether two way endpoints are "the
+# same point" when chaining ways into continuous polylines. ~1e-7 is only
+# large enough to absorb floating-point noise on truly shared OSM nodes;
+# real-world route relations often have ways that are meant to connect but
+# aren't perfectly node-snapped (small digitization gaps), so this is set
+# much looser (~11m) to actually merge them — every chain that DOESN'T get
+# merged pays a fixed ~10-12 byte encoding "restart" cost, and on networks
+# with hundreds of fragmented ways that overhead — not point density — is
+# usually the real driver of oversized payloads.
+CHAIN_JOIN_EPSILON_DEGREES = 0.0001
+
 # Raw city registry: "City Name": (longitude, latitude, radius_km, [optional_custom_tags])
 # Radius determines both the spatial bounding box and the auto-calculated map zoom.
 # optional_custom_tags, when present, overrides DEFAULT_ROUTE_TAGS for that
@@ -309,10 +320,11 @@ def simplify_line(coords, min_delta=0.0012):
     return simplified
 
 
-def _points_close(a, b, epsilon=1e-7):
-    """Treats two [lon, lat] points as the same OSM node if they're within
-    a tiny epsilon — shared way endpoints should be numerically identical,
-    this just guards against float noise."""
+def _points_close(a, b, epsilon=CHAIN_JOIN_EPSILON_DEGREES):
+    """Treats two [lon, lat] points as "the same" for chaining purposes if
+    they're within epsilon — loose enough to bridge small real-world
+    digitization gaps between ways that are meant to be continuous, not
+    just exact float noise on shared nodes."""
     return abs(a[0] - b[0]) < epsilon and abs(a[1] - b[1]) < epsilon
 
 
@@ -423,14 +435,89 @@ def fetch_route_chains(bbox, route_tags):
     return extract_relation_chains(overpass_data)
 
 
+def _chain_length_km(coords):
+    total = 0.0
+    for i in range(len(coords) - 1):
+        total += haversine_distance(coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1])
+    return total
+
+
+def _prune_chains_to_fit(main_chains, tram_chains, min_delta, static_fields, budget_bytes):
+    """
+    Last-resort fallback for when min_delta escalation alone can't hit
+    budget — usually because size is dominated by the NUMBER of chains
+    (each pays a fixed encoding "restart" cost) rather than point density
+    within each chain, which simplification can't fix.
+
+    Ranks all chains (main + tram together) by physical length, shortest
+    first, and binary-searches for the smallest number of the shortest
+    chains to drop so the rest fits. Dropped chains are the tiniest,
+    most fragment-like stubs; total_km/total_lines in static_fields
+    already reflect the full network and are left untouched, so the info
+    card still reports real network size even if a few slivers are
+    omitted from the drawing.
+
+    Returns (payload, size, dropped_count).
+    """
+    tagged = [("main", c) for c in main_chains] + [("tram", c) for c in tram_chains]
+    tagged.sort(key=lambda item: _chain_length_km(item[1]))  # shortest first
+
+    def build_for_drop_count(k):
+        kept = tagged[k:]
+        kept_main = [c for tag, c in kept if tag == "main"]
+        kept_tram = [c for tag, c in kept if tag == "tram"]
+        map_data = encode_chains(kept_main, min_delta)
+        map_data_tram = encode_chains(kept_tram, min_delta)
+        payload = {
+            "merge_variables": {
+                **static_fields,
+                "map_data": map_data,
+                "map_data_tram": map_data_tram,
+            }
+        }
+        size = len(json.dumps(payload).encode("utf-8"))
+        return payload, size
+
+    n = len(tagged)
+    lo, hi = 0, n
+    # Baseline: drop everything. If even an empty network doesn't fit, the
+    # static fields alone exceed budget — nothing more we can do here.
+    best_payload, best_size = build_for_drop_count(n)
+    if best_size > budget_bytes:
+        return best_payload, best_size, n
+
+    while lo < hi:
+        mid = (lo + hi) // 2
+        payload, size = build_for_drop_count(mid)
+        if size <= budget_bytes:
+            hi = mid
+            best_payload, best_size = payload, size
+        else:
+            lo = mid + 1
+
+    return best_payload, best_size, lo
+
+
 def build_payload_within_budget(city_name, city_data, main_chains, main_km, main_lines,
                                  tram_chains, tram_km, tram_lines):
     """
     Encodes main + tram chains and measures the actual JSON payload size,
-    escalating through ENCODING_ESCALATION (coarser simplification, then
-    lower precision) until it fits SIZE_BUDGET_BYTES. Falls back to the
-    most aggressive setting (with a warning) if it still doesn't fit.
+    escalating through ENCODING_ESCALATION (coarser simplification) until
+    it fits SIZE_BUDGET_BYTES. If size is being driven by chain COUNT
+    rather than point density (which simplification can't address — see
+    _prune_chains_to_fit), falls back to pruning the shortest chains.
     """
+    static_fields = {
+        "city_name": city_name,
+        "lon": city_data["center"][0],
+        "lat": city_data["center"][1],
+        "zoom": city_data["zoom"],
+        # Combined stats for the plugin's info card, based on the full
+        # network regardless of any pruning applied below.
+        "total_km": round(main_km + tram_km, 1),
+        "total_lines": main_lines + tram_lines,
+    }
+
     last_payload = None
     last_size = None
 
@@ -438,21 +525,7 @@ def build_payload_within_budget(city_name, city_data, main_chains, main_km, main
         map_data = encode_chains(main_chains, min_delta)
         map_data_tram = encode_chains(tram_chains, min_delta)
 
-        payload = {
-            "merge_variables": {
-                "city_name": city_name,
-                "lon": city_data["center"][0],
-                "lat": city_data["center"][1],
-                "zoom": city_data["zoom"],
-                "map_data": map_data,
-                "map_data_tram": map_data_tram,
-                # Combined stats for the plugin's info card; the two
-                # map_data fields stay split so they render as separate
-                # colored layers.
-                "total_km": round(main_km + tram_km, 1),
-                "total_lines": main_lines + tram_lines,
-            }
-        }
+        payload = {"merge_variables": {**static_fields, "map_data": map_data, "map_data_tram": map_data_tram}}
         size = len(json.dumps(payload).encode("utf-8"))
         last_payload, last_size = payload, size
 
@@ -463,10 +536,24 @@ def build_payload_within_budget(city_name, city_data, main_chains, main_km, main
         print(f"Payload too large at min_delta={min_delta}: {size} bytes, escalating...")
 
     print(
-        f"WARNING: payload still {last_size} bytes after maximum simplification "
-        f"(budget {SIZE_BUDGET_BYTES} bytes). Sending anyway — TRMNL may reject it."
+        f"Simplification alone didn't fit budget ({last_size} bytes); "
+        f"pruning shortest fragments (usually the real driver of oversized payloads)..."
     )
-    return last_payload, last_size
+    floor_min_delta = ENCODING_ESCALATION[-1]
+    payload, size, dropped = _prune_chains_to_fit(main_chains, tram_chains, floor_min_delta, static_fields, SIZE_BUDGET_BYTES)
+    total_chains = len(main_chains) + len(tram_chains)
+
+    if size <= SIZE_BUDGET_BYTES:
+        print(f"Payload fits budget after dropping {dropped}/{total_chains} shortest chains: {size} bytes")
+    else:
+        print(
+            f"WARNING: payload still {size} bytes after dropping {dropped}/{total_chains} chains "
+            f"(budget {SIZE_BUDGET_BYTES} bytes). Sending anyway — TRMNL may reject it."
+        )
+    return payload, size
+
+
+
 
 
 def run_daily_update():
