@@ -2,6 +2,7 @@ import os
 import random
 import time
 import requests
+import math
 
 TRMNL_WEBHOOK_URL = os.environ.get("TRMNL_WEBHOOK_URL")
 
@@ -11,14 +12,8 @@ CITIES = {
     "Athens": {"bbox": [23.59, 37.88, 23.90, 38.09], "center": [23.72, 37.98], "zoom": 11}
 }
 
-# OSM route=* values to include. "subway" alone is the closest match to
-# "metro". Add "light_rail" and/or "tram" to widen the net per city.
 ROUTE_TAGS = ["subway"]
 
-# overpass-api.de has been actively rate-limiting/banning automated traffic
-# (shared CI IP ranges look like "large scale" abuse to it), returning 406 or
-# 504 even for well-formed queries. Try several mirrors in order and fall
-# back automatically instead of depending on one instance staying up.
 OVERPASS_MIRRORS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -26,9 +21,6 @@ OVERPASS_MIRRORS = [
     "https://overpass.private.coffee/api/interpreter",
 ]
 
-# A real, identifying User-Agent (and Referer) is required by Overpass's
-# current usage policy -- generic/library-default headers get blocked.
-# Put a real repo/contact URL here; GitHub Actions can inject one via env.
 CONTACT_URL = os.environ.get("OVERPASS_CONTACT_URL", "https://github.com/your-org/trmnl-random-metro-map")
 REQUEST_HEADERS = {
     "User-Agent": f"trmnl-random-metro-map/1.0 ({CONTACT_URL})",
@@ -36,13 +28,7 @@ REQUEST_HEADERS = {
     "Content-Type": "text/plain",
 }
 
-
 def get_transit_data(bbox):
-    """
-    bbox: [west, south, east, north] (same convention the CITIES dict already uses).
-    Overpass wants (south, west, north, east) in its bbox filter.
-    Tries each mirror in OVERPASS_MIRRORS until one succeeds.
-    """
     west, south, east, north = bbox
     tag_filter = "|".join(ROUTE_TAGS)
 
@@ -66,13 +52,23 @@ def get_transit_data(bbox):
         except requests.exceptions.RequestException as exc:
             print(f"Overpass mirror failed ({mirror_url}): {exc}")
             last_error = exc
-            time.sleep(2)  # brief backoff before trying the next mirror
+            time.sleep(2)
 
     raise RuntimeError(f"All Overpass mirrors failed. Last error: {last_error}")
 
 
+def haversine_distance(lon1, lat1, lon2, lat2):
+    """Calculate the great-circle distance between two points on Earth in kilometers."""
+    R = 6371.0 # Earth radius in kilometers
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat / 2)**2 +
+         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+
 def _encode_signed_number(value):
-    """Encode a single delta as Google polyline chars."""
     value = value << 1
     if value < 0:
         value = ~value
@@ -83,13 +79,7 @@ def _encode_signed_number(value):
     chunks.append(chr(value + 63))
     return "".join(chunks)
 
-
 def encode_polyline(lat_lon_pairs, precision=5):
-    """
-    Standard Google Encoded Polyline Algorithm (same format Strava uses,
-    and what TRMNLMaps.decodePolyline() expects on the render side).
-    lat_lon_pairs: list of (lat, lon) tuples, in that order.
-    """
     factor = 10 ** precision
     out = []
     prev_lat = 0
@@ -102,13 +92,7 @@ def encode_polyline(lat_lon_pairs, precision=5):
         prev_lat, prev_lng = lat_i, lng_i
     return "".join(out)
 
-
 def simplify_line(coords, min_delta=0.0015):
-    """
-    coords: list of [lon, lat] points.
-    Drops points closer than ~150-160m to the last kept point, always
-    keeping the first and last point of the line.
-    """
     if len(coords) < 3:
         return coords
     simplified = [coords[0]]
@@ -122,22 +106,28 @@ def simplify_line(coords, min_delta=0.0015):
     return simplified
 
 
-def optimize_to_polyline_string(overpass_data, min_delta=0.0015, precision=5):
+def process_transit_data(overpass_data, min_delta=0.0015, precision=5):
     """
-    Converts Overpass 'out geom' relations into ';'-joined Google encoded
-    polylines, one per way segment. Ways shared by multiple route variants
-    (common where lines share trunk track) are only encoded once.
+    Parses OSM relations, calculates total network km, counts unique lines,
+    and returns encoded polylines for the TRMNL map component.
     """
     lines_encoded = []
     seen_way_ids = set()
+    total_km = 0.0
+    unique_lines = set()
 
     for element in overpass_data.get("elements", []):
         if element.get("type") != "relation":
             continue
 
+        # 1. Count distinct lines based on 'ref' or 'name' tags
+        tags = element.get("tags", {})
+        line_identifier = tags.get("ref") or tags.get("name") or str(element.get("id"))
+        unique_lines.add(line_identifier)
+
         for member in element.get("members", []):
             if member.get("type") != "way" or "geometry" not in member:
-                continue  # skip station/platform node members etc.
+                continue 
 
             way_id = member.get("ref")
             if way_id in seen_way_ids:
@@ -148,15 +138,23 @@ def optimize_to_polyline_string(overpass_data, min_delta=0.0015, precision=5):
             if len(coords) < 2:
                 continue
 
+            # 2. Calculate accurate distance BEFORE simplify_line drops points
+            for i in range(len(coords) - 1):
+                total_km += haversine_distance(
+                    coords[i][0], coords[i][1],
+                    coords[i+1][0], coords[i+1][1]
+                )
+
+            # 3. Simplify and encode for the map
             simplified = simplify_line(coords, min_delta=min_delta)
             if len(simplified) < 2:
                 continue
 
-            # polyline encoding wants (lat, lon)
             lat_lon_pairs = [(pt[1], pt[0]) for pt in simplified]
             lines_encoded.append(encode_polyline(lat_lon_pairs, precision=precision))
 
-    return ";".join(lines_encoded)
+    encoded_string = ";".join(lines_encoded)
+    return encoded_string, round(total_km, 1), len(unique_lines)
 
 
 def run_daily_update():
@@ -164,7 +162,9 @@ def run_daily_update():
     print(f"Fetching OSM transit data for {city_name}...")
 
     overpass_data = get_transit_data(city_data["bbox"])
-    encoded_string = optimize_to_polyline_string(overpass_data)
+    
+    # Unpack the three returned values
+    encoded_string, total_km, total_lines = process_transit_data(overpass_data)
 
     payload = {
         "merge_variables": {
@@ -173,12 +173,16 @@ def run_daily_update():
             "lat": city_data["center"][1],
             "zoom": city_data["zoom"],
             "map_data": encoded_string,
+            "total_km": total_km,           # <-- NEW
+            "total_lines": total_lines      # <-- NEW
         }
     }
 
     headers = {"Content-Type": "application/json"}
     resp = requests.post(TRMNL_WEBHOOK_URL, json=payload, headers=headers)
-    print(f"TRMNL Updated: Status {resp.status_code}, payload size {len(encoded_string)} bytes")
+    
+    print(f"TRMNL Updated: {city_name} | {total_lines} lines | {total_km} km")
+    print(f"Status {resp.status_code}, payload size {len(encoded_string)} bytes")
 
     if resp.status_code != 200:
         print("Error response:", resp.text)
