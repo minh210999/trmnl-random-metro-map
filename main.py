@@ -208,6 +208,16 @@ CITIES = {
 }
 
 
+# The public Overpass mirrors are free, community-run, and prone to being
+# slow or overloaded at random times — a single pass through all of them
+# failing doesn't necessarily mean the query itself is the problem, so we
+# retry the whole mirror list a couple of times with a growing backoff
+# before giving up.
+OVERPASS_MIRROR_DELAY_SECONDS = 2       # pause between mirrors within one pass
+OVERPASS_ROUND_RETRIES = 2              # extra full passes beyond the first (total attempts = 1 + this)
+OVERPASS_ROUND_BACKOFF_BASE_SECONDS = 10  # doubles after each failed full pass
+
+
 def get_transit_data(bbox, route_tags):
     west, south, east, north = bbox
     tag_filter = "|".join(route_tags)
@@ -219,22 +229,33 @@ def get_transit_data(bbox, route_tags):
     """
 
     last_error = None
-    for mirror_url in OVERPASS_MIRRORS:
-        try:
-            resp = requests.post(
-                mirror_url,
-                data={"data": query},
-                headers=REQUEST_HEADERS,
-                timeout=30,
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except requests.exceptions.RequestException as exc:
-            print(f"Overpass mirror failed ({mirror_url}): {exc}")
-            last_error = exc
-            time.sleep(2)
+    total_passes = 1 + OVERPASS_ROUND_RETRIES
 
-    raise RuntimeError(f"All Overpass mirrors failed. Last error: {last_error}")
+    for pass_num in range(1, total_passes + 1):
+        for mirror_url in OVERPASS_MIRRORS:
+            try:
+                resp = requests.post(
+                    mirror_url,
+                    data={"data": query},
+                    headers=REQUEST_HEADERS,
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                return resp.json()
+            except requests.exceptions.RequestException as exc:
+                print(f"Overpass mirror failed ({mirror_url}) [pass {pass_num}/{total_passes}]: {exc}")
+                last_error = exc
+                time.sleep(OVERPASS_MIRROR_DELAY_SECONDS)
+
+        if pass_num < total_passes:
+            backoff = OVERPASS_ROUND_BACKOFF_BASE_SECONDS * (2 ** (pass_num - 1))
+            print(
+                f"All Overpass mirrors failed on pass {pass_num}/{total_passes}; "
+                f"waiting {backoff}s before retrying all mirrors again..."
+            )
+            time.sleep(backoff)
+
+    raise RuntimeError(f"All Overpass mirrors failed after {total_passes} passes. Last error: {last_error}")
 
 
 def haversine_distance(lon1, lat1, lon2, lat2):
