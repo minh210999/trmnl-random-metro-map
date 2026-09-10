@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import random
@@ -6,7 +7,14 @@ import requests
 
 TRMNL_WEBHOOK_URL = os.environ.get("TRMNL_WEBHOOK_URL")
 
-DEFAULT_ROUTE_TAGS = ["subway", "light_rail", "tram"]
+# route_tags on a city entry now means "metro/railway" tags only (subway,
+# light_rail, train, bus, aerialway, etc). Tram is intentionally NOT part of
+# this — it's always fetched as its own separate query for every city (see
+# TRAM_TAG / run_daily_update), regardless of what's listed here, so it can
+# be drawn as its own (yellow) overlay independent of the metro/railway
+# (red) network.
+DEFAULT_ROUTE_TAGS = ["subway", "light_rail"]
+TRAM_TAG = "tram"
 
 OVERPASS_MIRRORS = [
     "https://overpass-api.de/api/interpreter",
@@ -22,6 +30,32 @@ REQUEST_HEADERS = {
     "Content-Type": "text/plain",
 }
 
+# --- TRMNL payload size safety -----------------------------------------
+# TRMNL webhook payloads are capped at 2KB (standard) / 5KB (TRMNL+). We
+# target a conservative budget below the 5KB hard limit to leave headroom
+# for JSON quoting/escaping overhead, and escalate simplification/precision
+# automatically (see build_payload_within_budget) until the payload fits.
+SIZE_BUDGET_BYTES = 4500
+
+# (min_delta degrees, polyline precision) pairs, tried in order from
+# "highest detail" to "most aggressive", until the encoded payload fits
+# SIZE_BUDGET_BYTES. precision=4 ~= 11m resolution, precision=3 ~= 111m —
+# both are finer than a single pixel on a city-wide e-ink map, so dropping
+# precision before it becomes visually obvious is a safe first move.
+ENCODING_ESCALATION = [
+    (0.0012, 4),
+    (0.0025, 4),
+    (0.005, 4),
+    (0.005, 3),
+    (0.01, 3),
+    (0.02, 3),
+]
+
+# Raw city registry: "City Name": (longitude, latitude, radius_km, [optional_custom_tags])
+# Radius determines both the spatial bounding box and the auto-calculated map zoom.
+# optional_custom_tags, when present, overrides DEFAULT_ROUTE_TAGS for that
+# city's metro/railway (red) network only — tram is never listed here, it's
+# always fetched separately and universally (see TRAM_TAG above).
 CITY_TARGETS = {
     # --- East Asia ---
     "Tokyo, Japan": (139.6917, 35.6895, 35),
@@ -92,9 +126,9 @@ CITY_TARGETS = {
     "Minsk, Belarus": (27.5615, 53.9045, 20),
     "Edinburgh, UK": (-3.1883, 55.9533, 16),
     "Manchester, UK": (-2.2426, 53.4808, 20),
-    "Dublin, Ireland": (-6.2603, 53.3498, 18, ["subway", "light_rail", "train", "tram"]),
+    "Dublin, Ireland": (-6.2603, 53.3498, 18, ["subway", "light_rail", "train"]),
     "Luxembourg City, Luxembourg": (6.1319, 49.6116, 12),
-    "Ljubljana, Slovenia": (14.5058, 46.0569, 12, ["train", "tram"]),
+    "Ljubljana, Slovenia": (14.5058, 46.0569, 12, ["train", "bus"]),
     "Zagreb, Croatia": (15.9819, 45.8150, 16),
 
     # --- North America ---
@@ -113,10 +147,10 @@ CITY_TARGETS = {
     # --- South America ---
     "Santiago, Chile": (-70.6693, -33.4489, 25),
     "Buenos Aires, Argentina": (-58.3816, -34.6037, 25),
-    "Bogotá, Colombia": (-74.0721, 4.7110, 25, ["subway", "light_rail", "tram"]),
-    "Medellín, Colombia": (-75.5644, 6.2518, 18, ["subway", "light_rail", "aerialway", "tram"]),
+    "Bogotá, Colombia": (-74.0721, 4.7110, 25, ["bus", "subway", "light_rail"]),
+    "Medellín, Colombia": (-75.5644, 6.2518, 18, ["subway", "light_rail", "aerialway"]),
     "São Paulo, Brazil": (-46.6333, -23.5505, 30),
-    "Curitiba, Brazil": (-49.2731, -25.4284, 20, ["subway", "light_rail", "tram"]),
+    "Curitiba, Brazil": (-49.2731, -25.4284, 20, ["bus", "subway", "light_rail"]),
     "Rio de Janeiro, Brazil": (-43.1729, -22.9068, 25),
     "Quito, Ecuador": (-78.4678, -0.1807, 20),
     "Lima, Peru": (-77.0428, -12.0464, 25),
@@ -127,18 +161,22 @@ CITY_TARGETS = {
     "Tel Aviv, Israel": (34.7818, 32.0853, 20),
     "Istanbul, Turkey": (28.9784, 41.0082, 30),
     "Cairo, Egypt": (31.2357, 30.0444, 25),
-    "Cape Town, South Africa": (18.4241, -33.9249, 25, ["train", "subway", "light_rail", "tram"]),
-    "Addis Ababa, Ethiopia": (38.7578, 9.0192, 18, ["light_rail", "subway", "tram"]),
+    "Cape Town, South Africa": (18.4241, -33.9249, 25, ["train", "subway", "light_rail"]),
+    "Addis Ababa, Ethiopia": (38.7578, 9.0192, 18, ["light_rail", "subway"]),
 
     # --- Oceania ---
-    "Melbourne, Australia": (144.9631, -37.8136, 25, ["train", "tram", "subway", "light_rail"]),
-    "Sydney, Australia": (151.2093, -33.8688, 28, ["subway", "train", "light_rail", "tram"]),
-    "Brisbane, Australia": (153.0251, -27.4698, 25, ["train", "subway", "light_rail", "tram"]),
-    "Auckland, New Zealand": (174.7633, -36.8485, 22, ["train", "subway", "light_rail", "tram"]),
+    "Melbourne, Australia": (144.9631, -37.8136, 25, ["train", "subway", "light_rail"]),
+    "Sydney, Australia": (151.2093, -33.8688, 28, ["subway", "train", "light_rail"]),
+    "Brisbane, Australia": (153.0251, -27.4698, 25, ["train", "bus", "subway", "light_rail"]),
+    "Auckland, New Zealand": (174.7633, -36.8485, 22, ["train", "bus", "subway", "light_rail"]),
 }
 
 
 def build_city_data(lon, lat, radius_km, route_tags=None):
+    """
+    Derives [west, south, east, north] bounding box and zoom level dynamically
+    from the center coordinate and network extent radius in kilometers.
+    """
     delta_lat = radius_km / 111.0
     delta_lon = radius_km / (111.0 * math.cos(math.radians(lat)))
 
@@ -173,12 +211,10 @@ def get_transit_data(bbox, route_tags):
     west, south, east, north = bbox
     tag_filter = "|".join(route_tags)
 
-    # Server-side spatial clipping using 'out geom(south,west,north,east) qt;'
-    # Drops all track coordinates outside the city bounds directly at the API source.
     query = f"""
     [out:json][timeout:25];
     relation["route"~"^({tag_filter})$"]({south},{west},{north},{east});
-    out geom({south},{west},{north},{east}) qt;
+    out geom;
     """
 
     last_error = None
@@ -201,6 +237,7 @@ def get_transit_data(bbox, route_tags):
 
 
 def haversine_distance(lon1, lat1, lon2, lat2):
+    """Calculate the great-circle distance between two points on Earth in kilometers."""
     R = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
@@ -236,7 +273,7 @@ def encode_polyline(lat_lon_pairs, precision=4):
     return "".join(out)
 
 
-def simplify_line(coords, min_delta=0.0020):
+def simplify_line(coords, min_delta=0.0012):
     if len(coords) < 3:
         return coords
     simplified = [coords[0]]
@@ -250,15 +287,74 @@ def simplify_line(coords, min_delta=0.0020):
     return simplified
 
 
-def extract_raw_segments(overpass_data):
+def _points_close(a, b, epsilon=1e-7):
+    """Treats two [lon, lat] points as the same OSM node if they're within
+    a tiny epsilon — shared way endpoints should be numerically identical,
+    this just guards against float noise."""
+    return abs(a[0] - b[0]) < epsilon and abs(a[1] - b[1]) < epsilon
+
+
+def _chain_relation_ways(members, seen_way_ids):
     """
-    Parses relations and splits way geometries into contiguous segments,
-    handling None/null entries produced by Overpass bbox clipping.
+    Concatenates a relation's member ways into as few continuous coordinate
+    chains as possible, instead of treating every way as its own separate
+    line. OSM route relations generally list their ways in travel order, so
+    consecutive ways' endpoints usually touch — chaining them means the
+    polyline encoder only pays its "first point" cost once per continuous
+    stretch instead of once per way, which is the single biggest saving
+    available before we even touch precision/simplification.
+
+    A new chain is only started when a way's endpoints genuinely don't
+    touch the current chain (a real gap) or when a way has already been
+    used by another relation (seen_way_ids) — never by guessing, so this
+    can't draw a fake connector across an actual break in the line.
     """
-    metro_segments = []
-    tram_segments = []
-    seen_metro_ways = set()
-    seen_tram_ways = set()
+    chains = []
+    current = []
+    for member in members:
+        if member.get("type") != "way" or "geometry" not in member:
+            continue
+
+        coords = [[pt["lon"], pt["lat"]] for pt in member["geometry"]]
+        if len(coords) < 2:
+            continue
+
+        way_id = member.get("ref")
+        if way_id in seen_way_ids:
+            # Already drawn as part of another relation (e.g. a shared
+            # trunk segment between two directional variants of a line) —
+            # skip it, and the continuity of the current chain is broken.
+            if current:
+                chains.append(current)
+                current = []
+            continue
+        seen_way_ids.add(way_id)
+
+        if not current:
+            current = coords
+        elif _points_close(current[-1], coords[0]):
+            current.extend(coords[1:])
+        elif _points_close(current[-1], coords[-1]):
+            current.extend(list(reversed(coords))[1:])
+        else:
+            chains.append(current)
+            current = coords
+
+    if current:
+        chains.append(current)
+    return chains
+
+
+def extract_relation_chains(overpass_data):
+    """
+    Turns raw Overpass JSON into (chains, total_km, line_count), without
+    encoding anything yet. Keeping extraction and encoding separate lets
+    the caller re-encode the same chains at different precision/
+    simplification levels (see build_payload_within_budget) without ever
+    re-fetching from Overpass.
+    """
+    chains = []
+    seen_way_ids = set()
     total_km = 0.0
     unique_lines = set()
 
@@ -267,55 +363,23 @@ def extract_raw_segments(overpass_data):
             continue
 
         tags = element.get("tags", {})
-        route_type = tags.get("route", "")
-        line_id = tags.get("ref") or tags.get("name") or str(element.get("id"))
-        unique_lines.add(line_id)
+        line_identifier = tags.get("ref") or tags.get("name") or str(element.get("id"))
+        unique_lines.add(line_identifier)
 
-        is_tram = (route_type == "tram")
-        seen_ways = seen_tram_ways if is_tram else seen_metro_ways
-        target_list = tram_segments if is_tram else metro_segments
+        for chain in _chain_relation_ways(element.get("members", []), seen_way_ids):
+            for i in range(len(chain) - 1):
+                total_km += haversine_distance(
+                    chain[i][0], chain[i][1],
+                    chain[i + 1][0], chain[i + 1][1]
+                )
+            chains.append(chain)
 
-        for member in element.get("members", []):
-            if member.get("type") != "way" or not member.get("geometry"):
-                continue
-            if member.get("role") in ("platform", "platform_entry_only", "platform_exit_only", "stop"):
-                continue
-
-            way_id = member.get("ref")
-            if way_id in seen_ways:
-                continue
-            seen_ways.add(way_id)
-
-            # Split geometry on None values into valid contiguous chains
-            current_chain = []
-            for pt in member["geometry"]:
-                if pt and "lon" in pt and "lat" in pt:
-                    current_chain.append([pt["lon"], pt["lat"]])
-                else:
-                    if len(current_chain) >= 2:
-                        for i in range(len(current_chain) - 1):
-                            total_km += haversine_distance(
-                                current_chain[i][0], current_chain[i][1],
-                                current_chain[i + 1][0], current_chain[i + 1][1]
-                            )
-                        target_list.append(current_chain)
-                    current_chain = []
-
-            # Append any trailing segment
-            if len(current_chain) >= 2:
-                for i in range(len(current_chain) - 1):
-                    total_km += haversine_distance(
-                        current_chain[i][0], current_chain[i][1],
-                        current_chain[i + 1][0], current_chain[i + 1][1]
-                    )
-                target_list.append(current_chain)
-
-    return metro_segments, tram_segments, round(total_km, 1), len(unique_lines)
+    return chains, round(total_km, 1), len(unique_lines)
 
 
-def compress_to_budget(segments, min_delta, precision=4):
+def encode_chains(chains, min_delta, precision):
     encoded = []
-    for chain in segments:
+    for chain in chains:
         simplified = simplify_line(chain, min_delta=min_delta)
         if len(simplified) < 2:
             continue
@@ -324,56 +388,88 @@ def compress_to_budget(segments, min_delta, precision=4):
     return ";".join(encoded)
 
 
-def process_transit_data(overpass_data, max_payload_bytes=4200):
-    metro_raw, tram_raw, total_km, total_lines = extract_raw_segments(overpass_data)
+def fetch_route_chains(bbox, route_tags):
+    """
+    Fetches Overpass data for the given route tags and returns raw chains
+    (not yet encoded). Returns empty results immediately (no network call)
+    if route_tags is empty.
+    """
+    if not route_tags:
+        return [], 0.0, 0
 
-    min_delta = 0.0020
-    precision = 4
+    overpass_data = get_transit_data(bbox, route_tags)
+    return extract_relation_chains(overpass_data)
 
-    while True:
-        encoded_metro = compress_to_budget(metro_raw, min_delta, precision=precision)
-        encoded_tram = compress_to_budget(tram_raw, min_delta, precision=precision)
-        combined_size = len(encoded_metro.encode("utf-8")) + len(encoded_tram.encode("utf-8"))
 
-        if combined_size <= max_payload_bytes or min_delta >= 0.015:
-            break
+def build_payload_within_budget(city_name, city_data, main_chains, main_km, main_lines,
+                                 tram_chains, tram_km, tram_lines):
+    """
+    Encodes main + tram chains and measures the actual JSON payload size,
+    escalating through ENCODING_ESCALATION (coarser simplification, then
+    lower precision) until it fits SIZE_BUDGET_BYTES. Falls back to the
+    most aggressive setting (with a warning) if it still doesn't fit.
+    """
+    last_payload = None
+    last_size = None
 
-        min_delta += 0.0010
+    for min_delta, precision in ENCODING_ESCALATION:
+        map_data = encode_chains(main_chains, min_delta, precision)
+        map_data_tram = encode_chains(tram_chains, min_delta, precision)
 
-    return encoded_metro, encoded_tram, total_km, total_lines
+        payload = {
+            "merge_variables": {
+                "city_name": city_name,
+                "lon": city_data["center"][0],
+                "lat": city_data["center"][1],
+                "zoom": city_data["zoom"],
+                "map_data": map_data,
+                "map_data_tram": map_data_tram,
+                # Combined stats for the plugin's info card; the two
+                # map_data fields stay split so they render as separate
+                # colored layers.
+                "total_km": round(main_km + tram_km, 1),
+                "total_lines": main_lines + tram_lines,
+            }
+        }
+        size = len(json.dumps(payload).encode("utf-8"))
+        last_payload, last_size = payload, size
+
+        if size <= SIZE_BUDGET_BYTES:
+            print(f"Payload fits budget at min_delta={min_delta}, precision={precision}: {size} bytes")
+            return payload, size
+
+        print(f"Payload too large at min_delta={min_delta}, precision={precision}: {size} bytes, escalating...")
+
+    print(
+        f"WARNING: payload still {last_size} bytes after maximum simplification "
+        f"(budget {SIZE_BUDGET_BYTES} bytes). Sending anyway — TRMNL may reject it."
+    )
+    return last_payload, last_size
 
 
 def run_daily_update():
     city_name, city_data = random.choice(list(CITIES.items()))
     print(f"Selected: {city_name} (zoom: {city_data['zoom']}, bbox: {city_data['bbox']})")
-    print("Fetching OSM transit data...")
 
-    overpass_data = get_transit_data(city_data["bbox"], city_data["route_tags"])
-    encoded_metro, encoded_tram, total_km, total_lines = process_transit_data(
-        overpass_data,
-        max_payload_bytes=4200
+    print(f"Fetching metro/railway data (tags: {city_data['route_tags']})...")
+    main_chains, main_km, main_lines = fetch_route_chains(city_data["bbox"], city_data["route_tags"])
+
+    print("Fetching tram data (always queried, every city)...")
+    tram_chains, tram_km, tram_lines = fetch_route_chains(city_data["bbox"], [TRAM_TAG])
+
+    payload, payload_size = build_payload_within_budget(
+        city_name, city_data, main_chains, main_km, main_lines, tram_chains, tram_km, tram_lines
     )
-
-    payload = {
-        "merge_variables": {
-            "city_name": city_name,
-            "lon": city_data["center"][0],
-            "lat": city_data["center"][1],
-            "zoom": city_data["zoom"],
-            "map_data": encoded_metro,
-            "tram_map_data": encoded_tram,
-            "total_km": total_km,
-            "total_lines": total_lines,
-        }
-    }
 
     headers = {"Content-Type": "application/json"}
     resp = requests.post(TRMNL_WEBHOOK_URL, json=payload, headers=headers)
 
-    metro_b = len(encoded_metro.encode("utf-8"))
-    tram_b = len(encoded_tram.encode("utf-8"))
-    print(f"TRMNL Updated: {city_name} | {total_lines} lines | {total_km} km")
-    print(f"Status {resp.status_code}, Metro: {metro_b}B, Tram: {tram_b}B (Total Polylines: {metro_b + tram_b}B)")
+    print(
+        f"TRMNL Updated: {city_name} | "
+        f"{main_lines} metro/railway lines ({main_km} km) | "
+        f"{tram_lines} tram lines ({tram_km} km)"
+    )
+    print(f"Status {resp.status_code}, payload size {payload_size} bytes")
 
     if resp.status_code != 200:
         print("Error response:", resp.text)
