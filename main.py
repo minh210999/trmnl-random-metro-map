@@ -6,7 +6,7 @@ import requests
 
 TRMNL_WEBHOOK_URL = os.environ.get("TRMNL_WEBHOOK_URL")
 
-DEFAULT_ROUTE_TAGS = ["subway", "light_rail"]
+DEFAULT_ROUTE_TAGS = ["subway", "light_rail", "tram"]
 
 OVERPASS_MIRRORS = [
     "https://overpass-api.de/api/interpreter",
@@ -23,7 +23,6 @@ REQUEST_HEADERS = {
 }
 
 # Raw city registry: "City Name": (longitude, latitude, radius_km, [optional_custom_tags])
-# Radius determines both the spatial bounding box and the auto-calculated map zoom.
 CITY_TARGETS = {
     # --- East Asia ---
     "Tokyo, Japan": (139.6917, 35.6895, 35),
@@ -94,7 +93,7 @@ CITY_TARGETS = {
     "Minsk, Belarus": (27.5615, 53.9045, 20),
     "Edinburgh, UK": (-3.1883, 55.9533, 16, ["subway", "light_rail", "tram"]),
     "Manchester, UK": (-2.2426, 53.4808, 20, ["subway", "light_rail", "tram"]),
-    "Dublin, Ireland": (-6.2603, 53.3498, 18, ["subway", "light_rail", "train"]),
+    "Dublin, Ireland": (-6.2603, 53.3498, 18, ["subway", "light_rail", "train", "tram"]),
     "Luxembourg City, Luxembourg": (6.1319, 49.6116, 12, ["subway", "light_rail", "tram"]),
     "Ljubljana, Slovenia": (14.5058, 46.0569, 12, ["train", "bus"]),
     "Zagreb, Croatia": (15.9819, 45.8150, 16, ["subway", "light_rail", "tram"]),
@@ -134,17 +133,13 @@ CITY_TARGETS = {
 
     # --- Oceania ---
     "Melbourne, Australia": (144.9631, -37.8136, 25, ["train", "tram", "subway", "light_rail"]),
-    "Sydney, Australia": (151.2093, -33.8688, 28, ["subway", "train", "light_rail"]),
-    "Brisbane, Australia": (153.0251, -27.4698, 25, ["train", "bus", "subway", "light_rail"]),
+    "Sydney, Australia": (151.2093, -33.8688, 28, ["subway", "train", "light_rail", "tram"]),
+    "Brisbane, Australia": (153.0251, -27.4698, 25, ["train", "bus", "subway", "light_rail", "tram"]),
     "Auckland, New Zealand": (174.7633, -36.8485, 22, ["train", "bus", "subway", "light_rail"]),
 }
 
 
 def build_city_data(lon, lat, radius_km, route_tags=None):
-    """
-    Derives [west, south, east, north] bounding box and zoom level dynamically
-    from the center coordinate and network extent radius in kilometers.
-    """
     delta_lat = radius_km / 111.0
     delta_lon = radius_km / (111.0 * math.cos(math.radians(lat)))
 
@@ -205,7 +200,6 @@ def get_transit_data(bbox, route_tags):
 
 
 def haversine_distance(lon1, lat1, lon2, lat2):
-    """Calculate the great-circle distance between two points on Earth in kilometers."""
     R = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
@@ -256,34 +250,46 @@ def simplify_line(coords, min_delta=0.0015):
 
 
 def process_transit_data(overpass_data, min_delta=0.0015, precision=5):
-    lines_encoded = []
-    seen_way_ids = set()
-    total_km = 0.0
-    unique_lines = set()
+    """
+    Parses OSM relations and separates them into 'metro' (subway, light_rail, train) 
+    and 'tram' categories, calculating individual lengths and encoded polylines.
+    """
+    categories = {
+        "metro": {"lines_encoded": [], "seen_ways": set(), "total_km": 0.0, "unique_lines": set()},
+        "tram": {"lines_encoded": [], "seen_ways": set(), "total_km": 0.0, "unique_lines": set()}
+    }
 
     for element in overpass_data.get("elements", []):
         if element.get("type") != "relation":
             continue
 
         tags = element.get("tags", {})
+        route_type = tags.get("route", "").lower()
         line_identifier = tags.get("ref") or tags.get("name") or str(element.get("id"))
-        unique_lines.add(line_identifier)
+
+        # Categorize relation type
+        if route_type == "tram":
+            target = categories["tram"]
+        else:
+            target = categories["metro"]
+
+        target["unique_lines"].add(line_identifier)
 
         for member in element.get("members", []):
             if member.get("type") != "way" or "geometry" not in member:
                 continue
 
             way_id = member.get("ref")
-            if way_id in seen_way_ids:
+            if way_id in target["seen_ways"]:
                 continue
-            seen_way_ids.add(way_id)
+            target["seen_ways"].add(way_id)
 
             coords = [[pt["lon"], pt["lat"]] for pt in member["geometry"]]
             if len(coords) < 2:
                 continue
 
             for i in range(len(coords) - 1):
-                total_km += haversine_distance(
+                target["total_km"] += haversine_distance(
                     coords[i][0], coords[i][1],
                     coords[i + 1][0], coords[i + 1][1]
                 )
@@ -293,10 +299,18 @@ def process_transit_data(overpass_data, min_delta=0.0015, precision=5):
                 continue
 
             lat_lon_pairs = [(pt[1], pt[0]) for pt in simplified]
-            lines_encoded.append(encode_polyline(lat_lon_pairs, precision=precision))
+            target["lines_encoded"].append(encode_polyline(lat_lon_pairs, precision=precision))
 
-    encoded_string = ";".join(lines_encoded)
-    return encoded_string, round(total_km, 1), len(unique_lines)
+    # Format output for each category
+    result = {}
+    for key, data in categories.items():
+        result[key] = {
+            "map_data": ";".join(data["lines_encoded"]),
+            "total_km": round(data["total_km"], 1),
+            "total_lines": len(data["unique_lines"])
+        }
+
+    return result
 
 
 def run_daily_update():
@@ -305,7 +319,15 @@ def run_daily_update():
     print(f"Fetching OSM transit data...")
 
     overpass_data = get_transit_data(city_data["bbox"], city_data["route_tags"])
-    encoded_string, total_km, total_lines = process_transit_data(overpass_data)
+    processed = process_transit_data(overpass_data)
+
+    metro_data = processed["metro"]
+    tram_data = processed["tram"]
+
+    # Combined totals for backward compatibility
+    combined_km = round(metro_data["total_km"] + tram_data["total_km"], 1)
+    combined_lines = metro_data["total_lines"] + tram_data["total_lines"]
+    combined_map_data = f"{metro_data['map_data']};{tram_data['map_data']}".strip(";")
 
     payload = {
         "merge_variables": {
@@ -313,17 +335,28 @@ def run_daily_update():
             "lon": city_data["center"][0],
             "lat": city_data["center"][1],
             "zoom": city_data["zoom"],
-            "map_data": encoded_string,
-            "total_km": total_km,
-            "total_lines": total_lines,
+            
+            # --- Separated Data ---
+            "metro_map_data": metro_data["map_data"],
+            "metro_total_km": metro_data["total_km"],
+            "metro_total_lines": metro_data["total_lines"],
+            
+            "tram_map_data": tram_data["map_data"],
+            "tram_total_km": tram_data["total_km"],
+            "tram_total_lines": tram_data["total_lines"],
+            
+            # --- Combined Data (Backward Compatible) ---
+            "map_data": combined_map_data,
+            "total_km": combined_km,
+            "total_lines": combined_lines,
         }
     }
 
     headers = {"Content-Type": "application/json"}
     resp = requests.post(TRMNL_WEBHOOK_URL, json=payload, headers=headers)
 
-    print(f"TRMNL Updated: {city_name} | {total_lines} lines | {total_km} km")
-    print(f"Status {resp.status_code}, payload size {len(encoded_string)} bytes")
+    print(f"TRMNL Updated: {city_name} | Metro: {metro_data['total_lines']} lines ({metro_data['total_km']} km) | Tram: {tram_data['total_lines']} lines ({tram_data['total_km']} km)")
+    print(f"Status {resp.status_code}, payload size {len(combined_map_data)} bytes")
 
     if resp.status_code != 200:
         print("Error response:", resp.text)
