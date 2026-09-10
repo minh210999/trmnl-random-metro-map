@@ -6,13 +6,37 @@ import math
 
 TRMNL_WEBHOOK_URL = os.environ.get("TRMNL_WEBHOOK_URL")
 
-CITIES = {
-    "Amsterdam": {"bbox": [4.72, 52.27, 5.05, 52.44], "center": [4.89, 52.36], "zoom": 11},
-    "Lyon": {"bbox": [4.74, 45.69, 4.96, 45.83], "center": [4.85, 45.76], "zoom": 11.5},
-    "Athens": {"bbox": [23.59, 37.88, 23.90, 38.09], "center": [23.72, 37.98], "zoom": 11}
-}
+# Cleaned list of 99 unique cities
+CITIES_LIST = [
+    "Tokyo, Japan", "Osaka, Japan", "Hong Kong", "Seoul, South Korea", "Singapore", 
+    "Shanghai, China", "Beijing, China", "Shenzhen, China", "Guangzhou, China", 
+    "Taipei, Taiwan", "Nagoya, Japan", "Kyoto, Japan", "Busan, South Korea", 
+    "Chengdu, China", "Wuhan, China", "Kuala Lumpur, Malaysia", "Bangkok, Thailand", 
+    "Jakarta, Indonesia", "Delhi, India", "Mumbai, India", "Ho Chi Minh City, Vietnam",
+    "Zurich, Switzerland", "Vienna, Austria", "Munich, Germany", "Berlin, Germany", 
+    "Paris, France", "London, UK", "Madrid, Spain", "Barcelona, Spain", 
+    "Amsterdam, Netherlands", "Copenhagen, Denmark", "Stockholm, Sweden", 
+    "Helsinki, Finland", "Oslo, Norway", "Prague, Czech Republic", "Budapest, Hungary", 
+    "Warsaw, Poland", "Milan, Italy", "Rome, Italy", "Lisbon, Portugal", 
+    "Brussels, Belgium", "Geneva, Switzerland", "Basel, Switzerland", "Hamburg, Germany", 
+    "Frankfurt, Germany", "Stuttgart, Germany", "Cologne, Germany", "Rotterdam, Netherlands", 
+    "Gothenburg, Sweden", "Bergen, Norway", "Lyon, France", "Marseille, France", 
+    "Bilbao, Spain", "Turin, Italy", "Naples, Italy", "Athens, Greece", 
+    "Bucharest, Romania", "Sofia, Bulgaria", "Moscow, Russia", "Saint Petersburg, Russia", 
+    "Kyiv, Ukraine", "Minsk, Belarus", "Edinburgh, UK", "Manchester, UK", "Dublin, Ireland", 
+    "Luxembourg City, Luxembourg", "Ljubljana, Slovenia", "Zagreb, Croatia",
+    "New York City, USA", "Toronto, Canada", "Montreal, Canada", "Vancouver, Canada", 
+    "Washington, D.C., USA", "Chicago, USA", "Boston, USA", "San Francisco, USA", 
+    "Philadelphia, USA", "Mexico City, Mexico", "Ottawa, Canada",
+    "Santiago, Chile", "Buenos Aires, Argentina", "Bogotá, Colombia", "Medellín, Colombia", 
+    "São Paulo, Brazil", "Curitiba, Brazil", "Rio de Janeiro, Brazil", "Quito, Ecuador", 
+    "Lima, Peru", "Dubai, UAE", "Doha, Qatar", "Tel Aviv, Israel", "Istanbul, Turkey", 
+    "Cairo, Egypt", "Cape Town, South Africa", "Addis Ababa, Ethiopia",
+    "Melbourne, Australia", "Sydney, Australia", "Brisbane, Australia", "Auckland, New Zealand"
+]
 
-ROUTE_TAGS = ["subway"]
+# Expanded to catch light rail and trams since some listed cities don't have heavy subways
+ROUTE_TAGS = ["subway", "light_rail", "tram", "monorail"]
 
 OVERPASS_MIRRORS = [
     "https://overpass-api.de/api/interpreter",
@@ -27,6 +51,33 @@ REQUEST_HEADERS = {
     "Referer": CONTACT_URL,
     "Content-Type": "text/plain",
 }
+
+def geocode_city(city_name):
+    """
+    Uses OSM Nominatim to fetch the bounding box and center coordinates for a city name.
+    """
+    url = "https://nominatim.openstreetmap.org/search"
+    params = {
+        "q": city_name,
+        "format": "json",
+        "limit": 1
+    }
+    resp = requests.get(url, params=params, headers=REQUEST_HEADERS, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    
+    if not data:
+        raise ValueError(f"Could not find coordinates for {city_name}")
+        
+    place = data[0]
+    # Nominatim bbox format: [south, north, west, east]
+    south, north, west, east = place["boundingbox"]
+    
+    return {
+        "bbox": [float(west), float(south), float(east), float(north)],
+        "center": [float(place["lon"]), float(place["lat"])],
+        "zoom": 11.5 # Default zoom level for city-scale view
+    }
 
 def get_transit_data(bbox):
     west, south, east, north = bbox
@@ -56,17 +107,14 @@ def get_transit_data(bbox):
 
     raise RuntimeError(f"All Overpass mirrors failed. Last error: {last_error}")
 
-
 def haversine_distance(lon1, lat1, lon2, lat2):
-    """Calculate the great-circle distance between two points on Earth in kilometers."""
-    R = 6371.0 # Earth radius in kilometers
+    R = 6371.0 
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
     a = (math.sin(dlat / 2)**2 +
          math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2)
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
     return R * c
-
 
 def _encode_signed_number(value):
     value = value << 1
@@ -105,12 +153,7 @@ def simplify_line(coords, min_delta=0.0015):
     simplified.append(coords[-1])
     return simplified
 
-
 def process_transit_data(overpass_data, min_delta=0.0015, precision=5):
-    """
-    Parses OSM relations, calculates total network km, counts unique lines,
-    and returns encoded polylines for the TRMNL map component.
-    """
     lines_encoded = []
     seen_way_ids = set()
     total_km = 0.0
@@ -120,7 +163,6 @@ def process_transit_data(overpass_data, min_delta=0.0015, precision=5):
         if element.get("type") != "relation":
             continue
 
-        # 1. Count distinct lines based on 'ref' or 'name' tags
         tags = element.get("tags", {})
         line_identifier = tags.get("ref") or tags.get("name") or str(element.get("id"))
         unique_lines.add(line_identifier)
@@ -138,14 +180,12 @@ def process_transit_data(overpass_data, min_delta=0.0015, precision=5):
             if len(coords) < 2:
                 continue
 
-            # 2. Calculate accurate distance BEFORE simplify_line drops points
             for i in range(len(coords) - 1):
                 total_km += haversine_distance(
                     coords[i][0], coords[i][1],
                     coords[i+1][0], coords[i+1][1]
                 )
 
-            # 3. Simplify and encode for the map
             simplified = simplify_line(coords, min_delta=min_delta)
             if len(simplified) < 2:
                 continue
@@ -158,35 +198,50 @@ def process_transit_data(overpass_data, min_delta=0.0015, precision=5):
 
 
 def run_daily_update():
-    city_name, city_data = random.choice(list(CITIES.items()))
-    print(f"Fetching OSM transit data for {city_name}...")
-
-    overpass_data = get_transit_data(city_data["bbox"])
+    max_retries = 3
     
-    # Unpack the three returned values
-    encoded_string, total_km, total_lines = process_transit_data(overpass_data)
+    # Retry loop in case a randomly selected city throws a geocoding error or has no transit
+    for attempt in range(max_retries):
+        city_name = random.choice(CITIES_LIST)
+        print(f"\nAttempt {attempt + 1}: Fetching OSM transit data for {city_name}...")
+        
+        try:
+            city_data = geocode_city(city_name)
+            overpass_data = get_transit_data(city_data["bbox"])
+            encoded_string, total_km, total_lines = process_transit_data(overpass_data)
+            
+            # If the query succeeded but returned 0 lines, pick another city
+            if total_lines == 0:
+                print(f"No valid transit routes found in {city_name}. Retrying...")
+                continue
+                
+            payload = {
+                "merge_variables": {
+                    # Strip the country part so the title is cleaner (e.g. just "Tokyo")
+                    "city_name": city_name.split(",")[0],
+                    "lon": city_data["center"][0],
+                    "lat": city_data["center"][1],
+                    "zoom": city_data["zoom"],
+                    "map_data": encoded_string,
+                    "total_km": total_km,
+                    "total_lines": total_lines
+                }
+            }
 
-    payload = {
-        "merge_variables": {
-            "city_name": city_name,
-            "lon": city_data["center"][0],
-            "lat": city_data["center"][1],
-            "zoom": city_data["zoom"],
-            "map_data": encoded_string,
-            "total_km": total_km,           # <-- NEW
-            "total_lines": total_lines      # <-- NEW
-        }
-    }
+            headers = {"Content-Type": "application/json"}
+            resp = requests.post(TRMNL_WEBHOOK_URL, json=payload, headers=headers)
+            
+            print(f"Success! Map of {city_name.split(',')[0]} generated.")
+            print(f"Lines: {total_lines} | Length: {total_km}km | Payload: {len(encoded_string)} bytes")
+            
+            if resp.status_code != 200:
+                print("TRMNL Error response:", resp.text)
+                
+            break # Exit the retry loop on success
 
-    headers = {"Content-Type": "application/json"}
-    resp = requests.post(TRMNL_WEBHOOK_URL, json=payload, headers=headers)
-    
-    print(f"TRMNL Updated: {city_name} | {total_lines} lines | {total_km} km")
-    print(f"Status {resp.status_code}, payload size {len(encoded_string)} bytes")
-
-    if resp.status_code != 200:
-        print("Error response:", resp.text)
-
+        except Exception as e:
+            print(f"Error processing {city_name}: {e}")
+            time.sleep(2)
 
 if __name__ == "__main__":
     run_daily_update()
