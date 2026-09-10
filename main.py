@@ -1,5 +1,6 @@
 import os
 import random
+import time
 import requests
 
 TRMNL_WEBHOOK_URL = os.environ.get("TRMNL_WEBHOOK_URL")
@@ -14,16 +15,33 @@ CITIES = {
 # "metro". Add "light_rail" and/or "tram" to widen the net per city.
 ROUTE_TAGS = ["subway"]
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-# Fallback mirrors if the main instance is slow/rate-limited:
-#   "https://overpass.kumi.systems/api/interpreter"
-#   "https://overpass.openstreetmap.ru/api/interpreter"
+# overpass-api.de has been actively rate-limiting/banning automated traffic
+# (shared CI IP ranges look like "large scale" abuse to it), returning 406 or
+# 504 even for well-formed queries. Try several mirrors in order and fall
+# back automatically instead of depending on one instance staying up.
+OVERPASS_MIRRORS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+]
+
+# A real, identifying User-Agent (and Referer) is required by Overpass's
+# current usage policy -- generic/library-default headers get blocked.
+# Put a real repo/contact URL here; GitHub Actions can inject one via env.
+CONTACT_URL = os.environ.get("OVERPASS_CONTACT_URL", "https://github.com/your-org/trmnl-random-metro-map")
+REQUEST_HEADERS = {
+    "User-Agent": f"trmnl-random-metro-map/1.0 ({CONTACT_URL})",
+    "Referer": CONTACT_URL,
+    "Content-Type": "text/plain",
+}
 
 
 def get_transit_data(bbox):
     """
     bbox: [west, south, east, north] (same convention the CITIES dict already uses).
     Overpass wants (south, west, north, east) in its bbox filter.
+    Tries each mirror in OVERPASS_MIRRORS until one succeeds.
     """
     west, south, east, north = bbox
     tag_filter = "|".join(ROUTE_TAGS)
@@ -34,14 +52,23 @@ def get_transit_data(bbox):
     out geom;
     """
 
-    resp = requests.post(
-        OVERPASS_URL,
-        data={"data": query},
-        headers={"User-Agent": "trmnl-transit-map/1.0 (contact: you@example.com)"},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()
+    last_error = None
+    for mirror_url in OVERPASS_MIRRORS:
+        try:
+            resp = requests.post(
+                mirror_url,
+                data={"data": query},
+                headers=REQUEST_HEADERS,
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.RequestException as exc:
+            print(f"Overpass mirror failed ({mirror_url}): {exc}")
+            last_error = exc
+            time.sleep(2)  # brief backoff before trying the next mirror
+
+    raise RuntimeError(f"All Overpass mirrors failed. Last error: {last_error}")
 
 
 def _encode_signed_number(value):
