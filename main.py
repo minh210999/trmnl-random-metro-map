@@ -6,7 +6,8 @@ import requests
 
 TRMNL_WEBHOOK_URL = os.environ.get("TRMNL_WEBHOOK_URL")
 
-DEFAULT_ROUTE_TAGS = ["subway", "light_rail"]
+# Include 'tram' by default
+DEFAULT_ROUTE_TAGS = ["subway", "light_rail", "tram"]
 
 OVERPASS_MIRRORS = [
     "https://overpass-api.de/api/interpreter",
@@ -23,7 +24,6 @@ REQUEST_HEADERS = {
 }
 
 # Raw city registry: "City Name": (longitude, latitude, radius_km, [optional_custom_tags])
-# Radius determines both the spatial bounding box and the auto-calculated map zoom.
 CITY_TARGETS = {
     # --- East Asia ---
     "Tokyo, Japan": (139.6917, 35.6895, 35),
@@ -51,7 +51,7 @@ CITY_TARGETS = {
     "Ho Chi Minh City, Vietnam": (106.6297, 10.8231, 20),
 
     # --- Europe ---
-    "Zurich, Switzerland": (8.5417, 47.3769, 15, ["subway", "light_rail", "tram"]),
+    "Zurich, Switzerland": (8.5417, 47.3769, 15),
     "Vienna, Austria": (16.3738, 48.2082, 20),
     "Munich, Germany": (11.5820, 48.1351, 22),
     "Berlin, Germany": (13.4050, 52.5200, 25),
@@ -71,15 +71,15 @@ CITY_TARGETS = {
     "Rome, Italy": (12.4964, 41.9028, 22),
     "Lisbon, Portugal": (-9.1393, 38.7223, 18),
     "Brussels, Belgium": (4.3517, 50.8503, 18),
-    "Geneva, Switzerland": (6.1432, 46.2044, 15, ["subway", "light_rail", "tram"]),
-    "Basel, Switzerland": (7.5886, 47.5596, 15, ["subway", "light_rail", "tram"]),
+    "Geneva, Switzerland": (6.1432, 46.2044, 15),
+    "Basel, Switzerland": (7.5886, 47.5596, 15),
     "Hamburg, Germany": (9.9937, 53.5511, 22),
     "Frankfurt, Germany": (8.6821, 50.1109, 20),
     "Stuttgart, Germany": (9.1829, 48.7758, 20),
     "Cologne, Germany": (6.9603, 50.9375, 20),
     "Rotterdam, Netherlands": (4.4777, 51.9244, 18),
-    "Gothenburg, Sweden": (11.9746, 57.7089, 18, ["subway", "light_rail", "tram"]),
-    "Bergen, Norway": (5.3221, 60.3913, 15, ["subway", "light_rail", "tram"]),
+    "Gothenburg, Sweden": (11.9746, 57.7089, 18),
+    "Bergen, Norway": (5.3221, 60.3913, 15),
     "Lyon, France": (4.8357, 45.7640, 18),
     "Marseille, France": (5.3698, 43.2965, 18),
     "Bilbao, Spain": (-2.9350, 43.2630, 16),
@@ -92,12 +92,12 @@ CITY_TARGETS = {
     "Saint Petersburg, Russia": (30.3351, 59.9343, 28),
     "Kyiv, Ukraine": (30.5234, 50.4501, 25),
     "Minsk, Belarus": (27.5615, 53.9045, 20),
-    "Edinburgh, UK": (-3.1883, 55.9533, 16, ["subway", "light_rail", "tram"]),
-    "Manchester, UK": (-2.2426, 53.4808, 20, ["subway", "light_rail", "tram"]),
-    "Dublin, Ireland": (-6.2603, 53.3498, 18, ["subway", "light_rail", "train"]),
-    "Luxembourg City, Luxembourg": (6.1319, 49.6116, 12, ["subway", "light_rail", "tram"]),
-    "Ljubljana, Slovenia": (14.5058, 46.0569, 12, ["train", "bus"]),
-    "Zagreb, Croatia": (15.9819, 45.8150, 16, ["subway", "light_rail", "tram"]),
+    "Edinburgh, UK": (-3.1883, 55.9533, 16),
+    "Manchester, UK": (-2.2426, 53.4808, 20),
+    "Dublin, Ireland": (-6.2603, 53.3498, 18, ["subway", "light_rail", "train", "tram"]),
+    "Luxembourg City, Luxembourg": (6.1319, 49.6116, 12),
+    "Ljubljana, Slovenia": (14.5058, 46.0569, 12, ["train", "bus", "tram"]),
+    "Zagreb, Croatia": (15.9819, 45.8150, 16),
 
     # --- North America ---
     "New York City, USA": (-74.0060, 40.7128, 30),
@@ -115,10 +115,10 @@ CITY_TARGETS = {
     # --- South America ---
     "Santiago, Chile": (-70.6693, -33.4489, 25),
     "Buenos Aires, Argentina": (-58.3816, -34.6037, 25),
-    "Bogotá, Colombia": (-74.0721, 4.7110, 25, ["bus", "subway", "light_rail"]),
-    "Medellín, Colombia": (-75.5644, 6.2518, 18, ["subway", "light_rail", "aerialway"]),
+    "Bogotá, Colombia": (-74.0721, 4.7110, 25, ["bus", "subway", "light_rail", "tram"]),
+    "Medellín, Colombia": (-75.5644, 6.2518, 18, ["subway", "light_rail", "aerialway", "tram"]),
     "São Paulo, Brazil": (-46.6333, -23.5505, 30),
-    "Curitiba, Brazil": (-49.2731, -25.4284, 20, ["bus", "subway", "light_rail"]),
+    "Curitiba, Brazil": (-49.2731, -25.4284, 20, ["bus", "subway", "light_rail", "tram"]),
     "Rio de Janeiro, Brazil": (-43.1729, -22.9068, 25),
     "Quito, Ecuador": (-78.4678, -0.1807, 20),
     "Lima, Peru": (-77.0428, -12.0464, 25),
@@ -129,22 +129,18 @@ CITY_TARGETS = {
     "Tel Aviv, Israel": (34.7818, 32.0853, 20),
     "Istanbul, Turkey": (28.9784, 41.0082, 30),
     "Cairo, Egypt": (31.2357, 30.0444, 25),
-    "Cape Town, South Africa": (18.4241, -33.9249, 25, ["train", "subway", "light_rail"]),
-    "Addis Ababa, Ethiopia": (38.7578, 9.0192, 18, ["light_rail", "subway"]),
+    "Cape Town, South Africa": (18.4241, -33.9249, 25, ["train", "subway", "light_rail", "tram"]),
+    "Addis Ababa, Ethiopia": (38.7578, 9.0192, 18, ["light_rail", "subway", "tram"]),
 
     # --- Oceania ---
     "Melbourne, Australia": (144.9631, -37.8136, 25, ["train", "tram", "subway", "light_rail"]),
-    "Sydney, Australia": (151.2093, -33.8688, 28, ["subway", "train", "light_rail"]),
-    "Brisbane, Australia": (153.0251, -27.4698, 25, ["train", "bus", "subway", "light_rail"]),
-    "Auckland, New Zealand": (174.7633, -36.8485, 22, ["train", "bus", "subway", "light_rail"]),
+    "Sydney, Australia": (151.2093, -33.8688, 28, ["subway", "train", "light_rail", "tram"]),
+    "Brisbane, Australia": (153.0251, -27.4698, 25, ["train", "bus", "subway", "light_rail", "tram"]),
+    "Auckland, New Zealand": (174.7633, -36.8485, 22, ["train", "bus", "subway", "light_rail", "tram"]),
 }
 
 
 def build_city_data(lon, lat, radius_km, route_tags=None):
-    """
-    Derives [west, south, east, north] bounding box and zoom level dynamically
-    from the center coordinate and network extent radius in kilometers.
-    """
     delta_lat = radius_km / 111.0
     delta_lon = radius_km / (111.0 * math.cos(math.radians(lat)))
 
@@ -205,7 +201,6 @@ def get_transit_data(bbox, route_tags):
 
 
 def haversine_distance(lon1, lat1, lon2, lat2):
-    """Calculate the great-circle distance between two points on Earth in kilometers."""
     R = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
@@ -256,8 +251,10 @@ def simplify_line(coords, min_delta=0.0015):
 
 
 def process_transit_data(overpass_data, min_delta=0.0015, precision=5):
-    lines_encoded = []
-    seen_way_ids = set()
+    metro_lines_encoded = []
+    tram_lines_encoded = []
+    seen_metro_ways = set()
+    seen_tram_ways = set()
     total_km = 0.0
     unique_lines = set()
 
@@ -266,17 +263,22 @@ def process_transit_data(overpass_data, min_delta=0.0015, precision=5):
             continue
 
         tags = element.get("tags", {})
+        route_type = tags.get("route", "")
         line_identifier = tags.get("ref") or tags.get("name") or str(element.get("id"))
         unique_lines.add(line_identifier)
+
+        is_tram = (route_type == "tram")
+        seen_ways = seen_tram_ways if is_tram else seen_metro_ways
+        target_list = tram_lines_encoded if is_tram else metro_lines_encoded
 
         for member in element.get("members", []):
             if member.get("type") != "way" or "geometry" not in member:
                 continue
 
             way_id = member.get("ref")
-            if way_id in seen_way_ids:
+            if way_id in seen_ways:
                 continue
-            seen_way_ids.add(way_id)
+            seen_ways.add(way_id)
 
             coords = [[pt["lon"], pt["lat"]] for pt in member["geometry"]]
             if len(coords) < 2:
@@ -293,10 +295,11 @@ def process_transit_data(overpass_data, min_delta=0.0015, precision=5):
                 continue
 
             lat_lon_pairs = [(pt[1], pt[0]) for pt in simplified]
-            lines_encoded.append(encode_polyline(lat_lon_pairs, precision=precision))
+            target_list.append(encode_polyline(lat_lon_pairs, precision=precision))
 
-    encoded_string = ";".join(lines_encoded)
-    return encoded_string, round(total_km, 1), len(unique_lines)
+    encoded_metro = ";".join(metro_lines_encoded)
+    encoded_tram = ";".join(tram_lines_encoded)
+    return encoded_metro, encoded_tram, round(total_km, 1), len(unique_lines)
 
 
 def run_daily_update():
@@ -305,7 +308,7 @@ def run_daily_update():
     print(f"Fetching OSM transit data...")
 
     overpass_data = get_transit_data(city_data["bbox"], city_data["route_tags"])
-    encoded_string, total_km, total_lines = process_transit_data(overpass_data)
+    encoded_metro, encoded_tram, total_km, total_lines = process_transit_data(overpass_data)
 
     payload = {
         "merge_variables": {
@@ -313,7 +316,8 @@ def run_daily_update():
             "lon": city_data["center"][0],
             "lat": city_data["center"][1],
             "zoom": city_data["zoom"],
-            "map_data": encoded_string,
+            "map_data": encoded_metro,
+            "tram_map_data": encoded_tram,
             "total_km": total_km,
             "total_lines": total_lines,
         }
@@ -323,7 +327,7 @@ def run_daily_update():
     resp = requests.post(TRMNL_WEBHOOK_URL, json=payload, headers=headers)
 
     print(f"TRMNL Updated: {city_name} | {total_lines} lines | {total_km} km")
-    print(f"Status {resp.status_code}, payload size {len(encoded_string)} bytes")
+    print(f"Status {resp.status_code}, Metro: {len(encoded_metro)}B, Tram: {len(encoded_tram)}B")
 
     if resp.status_code != 200:
         print("Error response:", resp.text)
