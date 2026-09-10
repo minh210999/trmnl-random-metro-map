@@ -9,11 +9,9 @@ TRMNL_WEBHOOK_URL = os.environ.get("TRMNL_WEBHOOK_URL")
 
 # Bounding boxes for cities: [min_lon, min_lat, max_lon, max_lat]
 CITIES = {
-    "Tokyo": [139.5, 35.5, 139.9, 35.8],
-    "New York": [-74.05, 40.6, -73.85, 40.9],
-    "Paris": [2.22, 48.81, 2.43, 48.90],
-    "London": [-0.25, 51.4, 0.05, 51.6],
-    "Berlin": [13.2, 52.4, 13.6, 52.6]
+    "Amsterdam": [4.72, 52.27, 5.05, 52.44],
+    "Lyon": [4.74, 45.69, 4.96, 45.83],
+    "Athens": [23.59, 37.88, 23.90, 38.09]
 }
 
 def get_transit_data(bbox):
