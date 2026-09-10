@@ -30,7 +30,7 @@ def get_transit_data(bbox):
     response.raise_for_status()
     return response.json()
 
-def geojson_to_svg(geojson_data, width=800, height=480, padding=30):
+def geojson_to_svg(geojson_data, width=600, height=360, padding=24):
     min_x, max_x = float('inf'), float('-inf')
     min_y, max_y = float('inf'), float('-inf')
 
