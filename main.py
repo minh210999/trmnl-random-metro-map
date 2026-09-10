@@ -6,7 +6,6 @@ import requests
 
 TRMNL_WEBHOOK_URL = os.environ.get("TRMNL_WEBHOOK_URL")
 
-# Include 'tram' by default
 DEFAULT_ROUTE_TAGS = ["subway", "light_rail", "tram"]
 
 OVERPASS_MIRRORS = [
@@ -23,7 +22,6 @@ REQUEST_HEADERS = {
     "Content-Type": "text/plain",
 }
 
-# Raw city registry: "City Name": (longitude, latitude, radius_km, [optional_custom_tags])
 CITY_TARGETS = {
     # --- East Asia ---
     "Tokyo, Japan": (139.6917, 35.6895, 35),
@@ -96,7 +94,7 @@ CITY_TARGETS = {
     "Manchester, UK": (-2.2426, 53.4808, 20),
     "Dublin, Ireland": (-6.2603, 53.3498, 18, ["subway", "light_rail", "train", "tram"]),
     "Luxembourg City, Luxembourg": (6.1319, 49.6116, 12),
-    "Ljubljana, Slovenia": (14.5058, 46.0569, 12, ["train", "bus", "tram"]),
+    "Ljubljana, Slovenia": (14.5058, 46.0569, 12, ["train", "tram"]),
     "Zagreb, Croatia": (15.9819, 45.8150, 16),
 
     # --- North America ---
@@ -115,10 +113,10 @@ CITY_TARGETS = {
     # --- South America ---
     "Santiago, Chile": (-70.6693, -33.4489, 25),
     "Buenos Aires, Argentina": (-58.3816, -34.6037, 25),
-    "Bogotá, Colombia": (-74.0721, 4.7110, 25, ["bus", "subway", "light_rail", "tram"]),
+    "Bogotá, Colombia": (-74.0721, 4.7110, 25, ["subway", "light_rail", "tram"]),
     "Medellín, Colombia": (-75.5644, 6.2518, 18, ["subway", "light_rail", "aerialway", "tram"]),
     "São Paulo, Brazil": (-46.6333, -23.5505, 30),
-    "Curitiba, Brazil": (-49.2731, -25.4284, 20, ["bus", "subway", "light_rail", "tram"]),
+    "Curitiba, Brazil": (-49.2731, -25.4284, 20, ["subway", "light_rail", "tram"]),
     "Rio de Janeiro, Brazil": (-43.1729, -22.9068, 25),
     "Quito, Ecuador": (-78.4678, -0.1807, 20),
     "Lima, Peru": (-77.0428, -12.0464, 25),
@@ -135,8 +133,8 @@ CITY_TARGETS = {
     # --- Oceania ---
     "Melbourne, Australia": (144.9631, -37.8136, 25, ["train", "tram", "subway", "light_rail"]),
     "Sydney, Australia": (151.2093, -33.8688, 28, ["subway", "train", "light_rail", "tram"]),
-    "Brisbane, Australia": (153.0251, -27.4698, 25, ["train", "bus", "subway", "light_rail", "tram"]),
-    "Auckland, New Zealand": (174.7633, -36.8485, 22, ["train", "bus", "subway", "light_rail", "tram"]),
+    "Brisbane, Australia": (153.0251, -27.4698, 25, ["train", "subway", "light_rail", "tram"]),
+    "Auckland, New Zealand": (174.7633, -36.8485, 22, ["train", "subway", "light_rail", "tram"]),
 }
 
 
@@ -175,10 +173,12 @@ def get_transit_data(bbox, route_tags):
     west, south, east, north = bbox
     tag_filter = "|".join(route_tags)
 
+    # Server-side spatial clipping using 'out geom(south,west,north,east) qt;'
+    # Drops all track coordinates outside the city bounds directly at the API source.
     query = f"""
     [out:json][timeout:25];
     relation["route"~"^({tag_filter})$"]({south},{west},{north},{east});
-    out geom;
+    out geom({south},{west},{north},{east}) qt;
     """
 
     last_error = None
@@ -222,7 +222,7 @@ def _encode_signed_number(value):
     return "".join(chunks)
 
 
-def encode_polyline(lat_lon_pairs, precision=5):
+def encode_polyline(lat_lon_pairs, precision=4):
     factor = 10 ** precision
     out = []
     prev_lat = 0
@@ -236,7 +236,7 @@ def encode_polyline(lat_lon_pairs, precision=5):
     return "".join(out)
 
 
-def simplify_line(coords, min_delta=0.0015):
+def simplify_line(coords, min_delta=0.0020):
     if len(coords) < 3:
         return coords
     simplified = [coords[0]]
@@ -250,9 +250,12 @@ def simplify_line(coords, min_delta=0.0015):
     return simplified
 
 
-def process_transit_data(overpass_data, min_delta=0.0015, precision=5):
-    metro_lines_encoded = []
-    tram_lines_encoded = []
+def extract_raw_segments(overpass_data):
+    """
+    Parses relations, filtering out non-track geometries and platform metadata.
+    """
+    metro_segments = []
+    tram_segments = []
     seen_metro_ways = set()
     seen_tram_ways = set()
     total_km = 0.0
@@ -264,15 +267,18 @@ def process_transit_data(overpass_data, min_delta=0.0015, precision=5):
 
         tags = element.get("tags", {})
         route_type = tags.get("route", "")
-        line_identifier = tags.get("ref") or tags.get("name") or str(element.get("id"))
-        unique_lines.add(line_identifier)
+        line_id = tags.get("ref") or tags.get("name") or str(element.get("id"))
+        unique_lines.add(line_id)
 
         is_tram = (route_type == "tram")
         seen_ways = seen_tram_ways if is_tram else seen_metro_ways
-        target_list = tram_lines_encoded if is_tram else metro_lines_encoded
+        target_list = tram_segments if is_tram else metro_segments
 
         for member in element.get("members", []):
+            # Drop nodes (stations/stops) and non-track roles (platforms)
             if member.get("type") != "way" or "geometry" not in member:
+                continue
+            if member.get("role") in ("platform", "platform_entry_only", "platform_exit_only", "stop"):
                 continue
 
             way_id = member.get("ref")
@@ -290,25 +296,51 @@ def process_transit_data(overpass_data, min_delta=0.0015, precision=5):
                     coords[i + 1][0], coords[i + 1][1]
                 )
 
-            simplified = simplify_line(coords, min_delta=min_delta)
-            if len(simplified) < 2:
-                continue
+            target_list.append(coords)
 
-            lat_lon_pairs = [(pt[1], pt[0]) for pt in simplified]
-            target_list.append(encode_polyline(lat_lon_pairs, precision=precision))
+    return metro_segments, tram_segments, round(total_km, 1), len(unique_lines)
 
-    encoded_metro = ";".join(metro_lines_encoded)
-    encoded_tram = ";".join(tram_lines_encoded)
-    return encoded_metro, encoded_tram, round(total_km, 1), len(unique_lines)
+
+def compress_to_budget(segments, min_delta, precision=4):
+    encoded = []
+    for chain in segments:
+        simplified = simplify_line(chain, min_delta=min_delta)
+        if len(simplified) < 2:
+            continue
+        lat_lon_pairs = [(pt[1], pt[0]) for pt in simplified]
+        encoded.append(encode_polyline(lat_lon_pairs, precision=precision))
+    return ";".join(encoded)
+
+
+def process_transit_data(overpass_data, max_payload_bytes=4200):
+    metro_raw, tram_raw, total_km, total_lines = extract_raw_segments(overpass_data)
+
+    min_delta = 0.0020
+    precision = 4
+
+    while True:
+        encoded_metro = compress_to_budget(metro_raw, min_delta, precision=precision)
+        encoded_tram = compress_to_budget(tram_raw, min_delta, precision=precision)
+        combined_size = len(encoded_metro.encode("utf-8")) + len(encoded_tram.encode("utf-8"))
+
+        if combined_size <= max_payload_bytes or min_delta >= 0.015:
+            break
+
+        min_delta += 0.0010
+
+    return encoded_metro, encoded_tram, total_km, total_lines
 
 
 def run_daily_update():
     city_name, city_data = random.choice(list(CITIES.items()))
     print(f"Selected: {city_name} (zoom: {city_data['zoom']}, bbox: {city_data['bbox']})")
-    print(f"Fetching OSM transit data...")
+    print("Fetching OSM transit data...")
 
     overpass_data = get_transit_data(city_data["bbox"], city_data["route_tags"])
-    encoded_metro, encoded_tram, total_km, total_lines = process_transit_data(overpass_data)
+    encoded_metro, encoded_tram, total_km, total_lines = process_transit_data(
+        overpass_data,
+        max_payload_bytes=4200
+    )
 
     payload = {
         "merge_variables": {
@@ -326,8 +358,10 @@ def run_daily_update():
     headers = {"Content-Type": "application/json"}
     resp = requests.post(TRMNL_WEBHOOK_URL, json=payload, headers=headers)
 
+    metro_b = len(encoded_metro.encode("utf-8"))
+    tram_b = len(encoded_tram.encode("utf-8"))
     print(f"TRMNL Updated: {city_name} | {total_lines} lines | {total_km} km")
-    print(f"Status {resp.status_code}, Metro: {len(encoded_metro)}B, Tram: {len(encoded_tram)}B")
+    print(f"Status {resp.status_code}, Metro: {metro_b}B, Tram: {tram_b}B (Total Polylines: {metro_b + tram_b}B)")
 
     if resp.status_code != 200:
         print("Error response:", resp.text)
