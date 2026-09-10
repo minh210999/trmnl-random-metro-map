@@ -252,7 +252,8 @@ def simplify_line(coords, min_delta=0.0020):
 
 def extract_raw_segments(overpass_data):
     """
-    Parses relations, filtering out non-track geometries and platform metadata.
+    Parses relations and splits way geometries into contiguous segments,
+    handling None/null entries produced by Overpass bbox clipping.
     """
     metro_segments = []
     tram_segments = []
@@ -275,8 +276,7 @@ def extract_raw_segments(overpass_data):
         target_list = tram_segments if is_tram else metro_segments
 
         for member in element.get("members", []):
-            # Drop nodes (stations/stops) and non-track roles (platforms)
-            if member.get("type") != "way" or "geometry" not in member:
+            if member.get("type") != "way" or not member.get("geometry"):
                 continue
             if member.get("role") in ("platform", "platform_entry_only", "platform_exit_only", "stop"):
                 continue
@@ -286,17 +286,29 @@ def extract_raw_segments(overpass_data):
                 continue
             seen_ways.add(way_id)
 
-            coords = [[pt["lon"], pt["lat"]] for pt in member["geometry"]]
-            if len(coords) < 2:
-                continue
+            # Split geometry on None values into valid contiguous chains
+            current_chain = []
+            for pt in member["geometry"]:
+                if pt and "lon" in pt and "lat" in pt:
+                    current_chain.append([pt["lon"], pt["lat"]])
+                else:
+                    if len(current_chain) >= 2:
+                        for i in range(len(current_chain) - 1):
+                            total_km += haversine_distance(
+                                current_chain[i][0], current_chain[i][1],
+                                current_chain[i + 1][0], current_chain[i + 1][1]
+                            )
+                        target_list.append(current_chain)
+                    current_chain = []
 
-            for i in range(len(coords) - 1):
-                total_km += haversine_distance(
-                    coords[i][0], coords[i][1],
-                    coords[i + 1][0], coords[i + 1][1]
-                )
-
-            target_list.append(coords)
+            # Append any trailing segment
+            if len(current_chain) >= 2:
+                for i in range(len(current_chain) - 1):
+                    total_km += haversine_distance(
+                        current_chain[i][0], current_chain[i][1],
+                        current_chain[i + 1][0], current_chain[i + 1][1]
+                    )
+                target_list.append(current_chain)
 
     return metro_segments, tram_segments, round(total_km, 1), len(unique_lines)
 
