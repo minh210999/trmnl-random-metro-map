@@ -1,0 +1,29 @@
+name: Daily TRMNL Transit Map
+
+on:
+  schedule:
+    # Runs at 12:00 UTC (8:00 AM EST) every day
+    - cron: '0 12 * * *'
+  workflow_dispatch: # Allows you to run it manually from the UI
+
+jobs:
+  update-trmnl:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Map Generator
+        env:
+          TRANSITLAND_API_KEY: ${{ secrets.TRANSITLAND_API_KEY }}
+          TRMNL_WEBHOOK_URL: ${{ secrets.TRMNL_WEBHOOK_URL }}
+        run: python main.py
