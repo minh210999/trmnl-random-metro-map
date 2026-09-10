@@ -31,11 +31,10 @@ def get_transit_data(bbox):
     return response.json()
 
 def geojson_to_svg(geojson_data, width=800, height=480, padding=30):
-    """Converts GeoJSON coordinates into an SVG scaled to fit the TRMNL screen"""
     min_x, max_x = float('inf'), float('-inf')
     min_y, max_y = float('inf'), float('-inf')
 
-    # 1. Find boundaries of the data
+    # 1. Find boundaries
     for feature in geojson_data.get('features', []):
         geom = feature.get('geometry')
         if not geom: continue
@@ -44,28 +43,25 @@ def geojson_to_svg(geojson_data, width=800, height=480, padding=30):
         
         for line in lines:
             for pt in line:
-                # Handle possible deeply nested coordinate arrays from MultiLineStrings
                 pts = pt if isinstance(pt[0], list) else [pt]
                 for p in pts:
                     min_x, max_x = min(min_x, p[0]), max(max_x, p[0])
                     min_y, max_y = min(min_y, p[1]), max(max_y, p[1])
 
-    # 2. Handle map distortion (adjust width scale by latitude)
+    # 2. Handle map distortion
     lat_rad = math.radians((min_y + max_y) / 2) if max_y != float('-inf') else 1
     aspect_correction = math.cos(lat_rad)
 
     range_x = (max_x - min_x) * aspect_correction or 1
     range_y = max_y - min_y or 1
     
-    # Calculate scale to fit within the TRMNL screen
     scale = min((width - 2 * padding) / range_x, (height - 2 * padding) / range_y)
-    
-    # Center the map
     x_offset = (width - (range_x * scale)) / 2
     y_offset = (height - (range_y * scale)) / 2
 
-    # 3. Map Coordinates to SVG paths
-    svg_paths = []
+    # 3. Map Coordinates to heavily optimized SVG
+    combined_path_d = []
+    
     for feature in geojson_data.get('features', []):
         geom = feature.get('geometry')
         if not geom: continue
@@ -75,18 +71,24 @@ def geojson_to_svg(geojson_data, width=800, height=480, padding=30):
         for line in lines:
             sublines = line if isinstance(line[0][0], list) else [line]
             for subline in sublines:
-                path_d = []
+                last_px, last_py = None, None
                 for i, pt in enumerate(subline):
-                    px = ((pt[0] - min_x) * aspect_correction) * scale + x_offset
-                    py = height - ((pt[1] - min_y) * scale + y_offset) # Invert Y for SVG (0,0 is top-left)
+                    # Convert to integers to save string space
+                    px = int(((pt[0] - min_x) * aspect_correction) * scale + x_offset)
+                    py = int(height - ((pt[1] - min_y) * scale + y_offset)) 
                     
+                    # Decimation: Skip points within 3 pixels of the last drawn point
+                    if last_px is not None and abs(px - last_px) < 3 and abs(py - last_py) < 3 and i != len(subline)-1:
+                        continue
+                        
+                    # Remove all spaces inside the path string (e.g. M10,20L15,25)
                     cmd = "M" if i == 0 else "L"
-                    path_d.append(f"{cmd} {px:.2f} {py:.2f}")
-                    
-                svg_paths.append(f'<path d="{" ".join(path_d)}" fill="none" stroke="black" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>')
+                    combined_path_d.append(f"{cmd}{px},{py}")
+                    last_px, last_py = px, py
 
-    paths_str = "\n".join(svg_paths)
-    return f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">\n{paths_str}\n</svg>'
+    # Combine into one single tag
+    path_str = "".join(combined_path_d)
+    return f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}"><path d="{path_str}" fill="none" stroke="black" stroke-width="4"/></svg>'
 
 def run_daily_update():
     """Main execution block"""
