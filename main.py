@@ -1,3 +1,4 @@
+import json
 import math
 import os
 import random
@@ -228,6 +229,10 @@ def _encode_signed_number(value):
 
 
 def encode_polyline(lat_lon_pairs, precision=5):
+    # precision must stay at 5 -- the TRMNL plugin (transit_map.html) decodes
+    # these with TRMNLMaps.decodePolyline(), which assumes the standard
+    # Google polyline precision. Changing this number without also updating
+    # the decoder will make every route render in the wrong place/shape.
     factor = 10 ** precision
     out = []
     prev_lat = 0
@@ -241,22 +246,63 @@ def encode_polyline(lat_lon_pairs, precision=5):
     return "".join(out)
 
 
-def simplify_line(coords, min_delta=0.0015):
-    if len(coords) < 3:
-        return coords
-    simplified = [coords[0]]
-    last = coords[0]
-    for pt in coords[1:-1]:
-        if abs(pt[0] - last[0]) < min_delta and abs(pt[1] - last[1]) < min_delta:
+def _perpendicular_distance(pt, line_start, line_end):
+    x0, y0 = pt
+    x1, y1 = line_start
+    x2, y2 = line_end
+    if (x1, y1) == (x2, y2):
+        return math.hypot(x0 - x1, y0 - y1)
+    num = abs((y2 - y1) * x0 - (x2 - x1) * y0 + x2 * y1 - y2 * x1)
+    den = math.hypot(y2 - y1, x2 - x1)
+    return num / den
+
+
+def douglas_peucker(points, epsilon):
+    """
+    Real Douglas-Peucker line simplification (perpendicular-distance based),
+    replacing the old crude "skip points within min_delta of the last kept
+    point" heuristic. Iterative (stack-based) rather than recursive so it
+    doesn't blow Python's recursion limit on very long, point-dense ways.
+    epsilon is in degrees, same unit the old min_delta used.
+    """
+    if len(points) < 3:
+        return points
+
+    keep = [False] * len(points)
+    keep[0] = keep[-1] = True
+    stack = [(0, len(points) - 1)]
+
+    while stack:
+        start, end = stack.pop()
+        if end - start < 2:
             continue
-        simplified.append(pt)
-        last = pt
-    simplified.append(coords[-1])
-    return simplified
+        dmax = 0.0
+        index = start
+        for i in range(start + 1, end):
+            d = _perpendicular_distance(points[i], points[start], points[end])
+            if d > dmax:
+                dmax = d
+                index = i
+        if dmax > epsilon:
+            keep[index] = True
+            stack.append((start, index))
+            stack.append((index, end))
+
+    return [points[i] for i in range(len(points)) if keep[i]]
 
 
-def process_transit_data(overpass_data, min_delta=0.0015, precision=5):
-    lines_encoded = []
+def collect_transit_ways(overpass_data):
+    """
+    Extracts deduped way geometries plus summary stats (total km, unique
+    line count) from a raw Overpass response. Geometry is returned
+    unsimplified/unencoded -- fit_map_data() handles turning it into a
+    payload that fits TRMNL's size limit.
+
+    Ways are deduped by OSM way id (seen_way_ids) because multiple transit
+    lines often share physical track, and without dedup that shared track
+    would be counted and drawn multiple times.
+    """
+    raw_ways = []
     seen_way_ids = set()
     total_km = 0.0
     unique_lines = set()
@@ -288,24 +334,83 @@ def process_transit_data(overpass_data, min_delta=0.0015, precision=5):
                     coords[i + 1][0], coords[i + 1][1]
                 )
 
-            simplified = simplify_line(coords, min_delta=min_delta)
-            if len(simplified) < 2:
-                continue
+            raw_ways.append(coords)
 
-            lat_lon_pairs = [(pt[1], pt[0]) for pt in simplified]
-            lines_encoded.append(encode_polyline(lat_lon_pairs, precision=precision))
+    return raw_ways, round(total_km, 1), len(unique_lines)
 
-    encoded_string = ";".join(lines_encoded)
-    return encoded_string, round(total_km, 1), len(unique_lines)
+
+def encode_ways(raw_ways, min_delta, precision=5):
+    """Simplify (Douglas-Peucker) then polyline-encode a set of way
+    geometries at a given simplification tolerance."""
+    encoded = []
+    for coords in raw_ways:
+        simplified = douglas_peucker(coords, min_delta)
+        if len(simplified) < 2:
+            continue
+        lat_lon_pairs = [(pt[1], pt[0]) for pt in simplified]
+        encoded.append(encode_polyline(lat_lon_pairs, precision=precision))
+    return encoded
+
+
+# Simplification tolerances to try, in increasing order (degrees). Each step
+# roughly doubles how aggressively near-straight detail gets dropped.
+MIN_DELTA_STEPS = [0.0015, 0.0025, 0.004, 0.006, 0.009, 0.013, 0.02, 0.03]
+
+# Budget for the encoded map_data string alone, not the whole JSON payload.
+# TRMNL's free-tier limit is ~5KB for the whole payload; this leaves
+# headroom for city_name/lon/lat/zoom/total_km/total_lines and JSON
+# structure overhead.
+TARGET_MAP_DATA_BYTES = 4200
+
+
+def fit_map_data(raw_ways, target_bytes=TARGET_MAP_DATA_BYTES):
+    """
+    Finds an encoded map_data string that fits under target_bytes.
+
+    First tries increasingly aggressive Douglas-Peucker simplification
+    (MIN_DELTA_STEPS). If even the coarsest tolerance still doesn't fit,
+    falls back to dropping the shortest way geometries (by point count, a
+    cheap proxy for length -- usually short tram/bus spurs) one at a time
+    until it does.
+
+    Returns (encoded_string, min_delta_used, ways_dropped).
+    """
+    encoded_string = ""
+    for min_delta in MIN_DELTA_STEPS:
+        encoded_lines = encode_ways(raw_ways, min_delta)
+        encoded_string = ";".join(encoded_lines)
+        if len(encoded_string.encode("utf-8")) <= target_bytes:
+            return encoded_string, min_delta, 0
+
+    max_delta = MIN_DELTA_STEPS[-1]
+    ways_by_size = sorted(raw_ways, key=len, reverse=True)
+    for cutoff in range(len(ways_by_size) - 1, 0, -1):
+        subset = ways_by_size[:cutoff]
+        encoded_lines = encode_ways(subset, max_delta)
+        encoded_string = ";".join(encoded_lines)
+        if len(encoded_string.encode("utf-8")) <= target_bytes:
+            return encoded_string, max_delta, len(ways_by_size) - cutoff
+
+    # Nothing got it under budget -- return the most-reduced attempt we
+    # have. TRMNL will likely still reject it, but that's now a rare, loud
+    # edge case (visible in the printed payload size / error response)
+    # rather than a silent one.
+    return encoded_string, max_delta, len(ways_by_size) - 1
 
 
 def run_daily_update():
     city_name, city_data = random.choice(list(CITIES.items()))
     print(f"Selected: {city_name} (zoom: {city_data['zoom']}, bbox: {city_data['bbox']})")
-    print(f"Fetching OSM transit data...")
+    print("Fetching OSM transit data...")
 
     overpass_data = get_transit_data(city_data["bbox"], city_data["route_tags"])
-    encoded_string, total_km, total_lines = process_transit_data(overpass_data)
+    raw_ways, total_km, total_lines = collect_transit_ways(overpass_data)
+    encoded_string, min_delta_used, ways_dropped = fit_map_data(raw_ways)
+
+    if min_delta_used != MIN_DELTA_STEPS[0]:
+        print(f"Simplification tolerance raised to {min_delta_used} to fit payload budget")
+    if ways_dropped:
+        print(f"Warning: dropped {ways_dropped} short way segment(s) to fit payload budget")
 
     payload = {
         "merge_variables": {
@@ -319,11 +424,13 @@ def run_daily_update():
         }
     }
 
+    # Compact separators shave a few bytes off the JSON body.
+    body = json.dumps(payload, separators=(",", ":"))
     headers = {"Content-Type": "application/json"}
-    resp = requests.post(TRMNL_WEBHOOK_URL, json=payload, headers=headers)
+    resp = requests.post(TRMNL_WEBHOOK_URL, data=body, headers=headers)
 
     print(f"TRMNL Updated: {city_name} | {total_lines} lines | {total_km} km")
-    print(f"Status {resp.status_code}, payload size {len(encoded_string)} bytes")
+    print(f"Status {resp.status_code}, payload size {len(body.encode('utf-8'))} bytes")
 
     if resp.status_code != 200:
         print("Error response:", resp.text)
