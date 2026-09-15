@@ -52,7 +52,7 @@ CITY_TARGETS = {
     "Ho Chi Minh City, Vietnam": (106.6297, 10.8231, 20),
 
     # --- Europe ---
-    "Zurich, Switzerland": (8.5417, 47.3769, 15,  
+    "Zurich, Switzerland": (8.5417, 47.3769, 15, ["subway", "light_rail", "tram"]),
     "Vienna, Austria": (16.3738, 48.2082, 20),
     "Munich, Germany": (11.5820, 48.1351, 22),
     "Berlin, Germany": (13.4050, 52.5200, 25),
@@ -72,15 +72,15 @@ CITY_TARGETS = {
     "Rome, Italy": (12.4964, 41.9028, 22),
     "Lisbon, Portugal": (-9.1393, 38.7223, 18),
     "Brussels, Belgium": (4.3517, 50.8503, 18),
-    "Geneva, Switzerland": (6.1432, 46.2044, 15,  
-    "Basel, Switzerland": (7.5886, 47.5596, 15,  
+    "Geneva, Switzerland": (6.1432, 46.2044, 15, ["subway", "light_rail", "tram"]),
+    "Basel, Switzerland": (7.5886, 47.5596, 15, ["subway", "light_rail", "tram"]),
     "Hamburg, Germany": (9.9937, 53.5511, 22),
     "Frankfurt, Germany": (8.6821, 50.1109, 20),
     "Stuttgart, Germany": (9.1829, 48.7758, 20),
     "Cologne, Germany": (6.9603, 50.9375, 20),
     "Rotterdam, Netherlands": (4.4777, 51.9244, 18),
-    "Gothenburg, Sweden": (11.9746, 57.7089, 18,  
-    "Bergen, Norway": (5.3221, 60.3913, 15,  
+    "Gothenburg, Sweden": (11.9746, 57.7089, 18, ["subway", "light_rail", "tram"]),
+    "Bergen, Norway": (5.3221, 60.3913, 15, ["subway", "light_rail", "tram"]),
     "Lyon, France": (4.8357, 45.7640, 18),
     "Marseille, France": (5.3698, 43.2965, 18),
     "Bilbao, Spain": (-2.9350, 43.2630, 16),
@@ -93,12 +93,12 @@ CITY_TARGETS = {
     "Saint Petersburg, Russia": (30.3351, 59.9343, 28),
     "Kyiv, Ukraine": (30.5234, 50.4501, 25),
     "Minsk, Belarus": (27.5615, 53.9045, 20),
-    "Edinburgh, UK": (-3.1883, 55.9533, 16,  
-    "Manchester, UK": (-2.2426, 53.4808, 20,  
-    "Dublin, Ireland": (-6.2603, 53.3498, 18, 
-    "Luxembourg City, Luxembourg": (6.1319, 49.6116, 12,  
-    "Ljubljana, Slovenia": (14.5058, 46.0569, 12, 
-    "Zagreb, Croatia": (15.9819, 45.8150, 16,  
+    "Edinburgh, UK": (-3.1883, 55.9533, 16, ["subway", "light_rail", "tram"]),
+    "Manchester, UK": (-2.2426, 53.4808, 20, ["subway", "light_rail", "tram"]),
+    "Dublin, Ireland": (-6.2603, 53.3498, 18, ["subway", "light_rail", "train"]),
+    "Luxembourg City, Luxembourg": (6.1319, 49.6116, 12, ["subway", "light_rail", "tram"]),
+    "Ljubljana, Slovenia": (14.5058, 46.0569, 12, ["train", "bus"]),
+    "Zagreb, Croatia": (15.9819, 45.8150, 16, ["subway", "light_rail", "tram"]),
 
     # --- North America ---
     "New York City, USA": (-74.0060, 40.7128, 30),
@@ -116,10 +116,10 @@ CITY_TARGETS = {
     # --- South America ---
     "Santiago, Chile": (-70.6693, -33.4489, 25),
     "Buenos Aires, Argentina": (-58.3816, -34.6037, 25),
-    "Bogotá, Colombia": (-74.0721, 4.7110, 25, 
-    "Medellín, Colombia": (-75.5644, 6.2518, 18, 
+    "Bogotá, Colombia": (-74.0721, 4.7110, 25, ["bus", "subway", "light_rail"]),
+    "Medellín, Colombia": (-75.5644, 6.2518, 18, ["subway", "light_rail", "aerialway"]),
     "São Paulo, Brazil": (-46.6333, -23.5505, 30),
-    "Curitiba, Brazil": (-49.2731, -25.4284, 20, 
+    "Curitiba, Brazil": (-49.2731, -25.4284, 20, ["bus", "subway", "light_rail"]),
     "Rio de Janeiro, Brazil": (-43.1729, -22.9068, 25),
     "Quito, Ecuador": (-78.4678, -0.1807, 20),
     "Lima, Peru": (-77.0428, -12.0464, 25),
@@ -130,15 +130,14 @@ CITY_TARGETS = {
     "Tel Aviv, Israel": (34.7818, 32.0853, 20),
     "Istanbul, Turkey": (28.9784, 41.0082, 30),
     "Cairo, Egypt": (31.2357, 30.0444, 25),
-    "Cape Town, South Africa": (18.4241, -33.9249, 25, 
-    "Addis Ababa, Ethiopia": (38.7578, 9.0192, 18, 
+    "Cape Town, South Africa": (18.4241, -33.9249, 25, ["train", "subway", "light_rail"]),
+    "Addis Ababa, Ethiopia": (38.7578, 9.0192, 18, ["light_rail", "subway"]),
 
     # --- Oceania ---
-    "Melbourne, Australia": (144.9631, -37.8136, 25, 
-    "Sydney, Australia": (151.2093, -33.8688, 28, 
-    "Brisbane, Australia": (153.0251, -27.4698, 25,  
-    "Auckland, New Zealand": (174.7633, -36.8485, 22, 
- 
+    "Melbourne, Australia": (144.9631, -37.8136, 25, ["train", "tram", "subway", "light_rail"]),
+    "Sydney, Australia": (151.2093, -33.8688, 28, ["subway", "train", "light_rail"]),
+    "Brisbane, Australia": (153.0251, -27.4698, 25, ["train", "bus", "subway", "light_rail"]),
+    "Auckland, New Zealand": (174.7633, -36.8485, 22, ["train", "bus", "subway", "light_rail"]),
 }
 
 
@@ -440,11 +439,9 @@ def merge_contiguous_ways(ways):
     Two ways are merged only at a point where *exactly* two way-ends meet
     (a simple pass-through) -- a junction where three or more ways meet is
     left alone, since there's no single unambiguous line to continue, and
-    it's a real branch point worth preserving as one. Ways are only merged
-    within the same is_shared group, never across it, since individual and
-    shared track are drawn in different colors downstream.
+    it's a real branch point worth preserving as one.
 
-    Input/output shape: [{"coords": [[lon, lat], ...], "is_shared": bool}, ...]
+    Input/output shape: [{"coords": [[lon, lat], ...]}, ...]
     """
     remaining = {i: dict(w) for i, w in enumerate(ways)}
     next_id = len(remaining)
@@ -454,7 +451,7 @@ def merge_contiguous_ways(ways):
         for wid, w in remaining.items():
             coords = w["coords"]
             for which, pt in (("start", coords[0]), ("end", coords[-1])):
-                key = (_endpoint_key(pt), w["is_shared"])
+                key = _endpoint_key(pt)
                 endpoints.setdefault(key, []).append((wid, which))
 
         merged_any = False
@@ -478,7 +475,7 @@ def merge_contiguous_ways(ways):
             # a_coords now ends where b_coords begins
             merged_coords = a_coords + b_coords[1:]
 
-            remaining[next_id] = {"coords": merged_coords, "is_shared": wa["is_shared"]}
+            remaining[next_id] = {"coords": merged_coords}
             next_id += 1
             del remaining[wid_a]
             del remaining[wid_b]
@@ -501,11 +498,8 @@ def collect_transit_ways(overpass_data, bbox):
     tracked here since it's no longer part of the displayed payload).
 
     A way is deduped to a single geometry (seen once, keyed by OSM way id)
-    but every relation that references it is tracked, so a way used by two
-    or more distinct route relations -- i.e. physical track shared by
-    multiple lines -- can be flagged via is_shared and drawn differently
-    (see run_daily_update, which splits the final way list into a red
-    "individual track" payload and a yellow "shared track" payload).
+    because multiple transit lines often share physical track, and without
+    dedup that shared track would be counted and drawn multiple times.
     Contiguous ways are then merged (see merge_contiguous_ways) so a
     physical corridor OSM happened to split into many short ways is
     treated as one line, each merged way is split on any implausible
@@ -514,8 +508,7 @@ def collect_transit_ways(overpass_data, bbox):
     clip_line_to_bbox) so geometry outside the visible area never reaches
     simplification/encoding -- one way can yield zero, one, or several runs.
     """
-    way_geometry = {}   # way_id -> [[lon, lat], ...], first-seen geometry only
-    way_relations = {}  # way_id -> set of relation ids that reference it
+    way_geometry = {}  # way_id -> [[lon, lat], ...], first-seen geometry only
     unique_lines = set()
 
     for element in overpass_data.get("elements", []):
@@ -525,31 +518,25 @@ def collect_transit_ways(overpass_data, bbox):
         tags = element.get("tags", {})
         line_identifier = tags.get("ref") or tags.get("name") or str(element.get("id"))
         unique_lines.add(line_identifier)
-        relation_id = element.get("id")
 
         for member in element.get("members", []):
             if member.get("type") != "way" or "geometry" not in member:
                 continue
 
             way_id = member.get("ref")
-            if way_id not in way_geometry:
-                coords = [[pt["lon"], pt["lat"]] for pt in member["geometry"]]
-                if len(coords) < 2:
-                    continue
-                way_geometry[way_id] = coords
+            if way_id in way_geometry:
+                continue
 
-            way_relations.setdefault(way_id, set()).add(relation_id)
+            coords = [[pt["lon"], pt["lat"]] for pt in member["geometry"]]
+            if len(coords) < 2:
+                continue
+            way_geometry[way_id] = coords
 
-    ways = [
-        {"coords": coords, "is_shared": len(way_relations.get(way_id, ())) > 1}
-        for way_id, coords in way_geometry.items()
-    ]
+    ways = [{"coords": coords} for coords in way_geometry.values()]
     merged_ways = merge_contiguous_ways(ways)
 
-    raw_ways = []  # [{"coords": [...], "length_km": float, "is_shared": bool}, ...]
+    raw_ways = []  # [{"coords": [...], "length_km": float}, ...]
     for way in merged_ways:
-        is_shared = way["is_shared"]
-
         for clean_run in split_on_large_gaps(way["coords"]):
             for run in clip_line_to_bbox(clean_run, bbox):
                 run_km = 0.0
@@ -558,7 +545,7 @@ def collect_transit_ways(overpass_data, bbox):
                         run[i][0], run[i][1],
                         run[i + 1][0], run[i + 1][1]
                     )
-                raw_ways.append({"coords": run, "length_km": run_km, "is_shared": is_shared})
+                raw_ways.append({"coords": run, "length_km": run_km})
 
     return raw_ways, len(unique_lines)
 
@@ -591,38 +578,29 @@ def encode_ways(raw_ways, min_delta, precision=5):
 # fit_map_data() drops whole ways instead of simplifying further.
 MIN_DELTA_STEPS = [0.0015, 0.0025, 0.004, 0.006]
 
-# Budget for the combined encoded route geometry (map_data + map_data_shared
-# together), not the whole JSON payload. TRMNL's free-tier limit is ~5KB for
-# the whole payload; this leaves headroom for city_name/lon/lat/zoom/
-# total_lines and JSON structure overhead.
+# Budget for the encoded map_data string alone, not the whole JSON payload.
+# TRMNL's free-tier limit is ~5KB for the whole payload; this leaves
+# headroom for city_name/lon/lat/zoom/total_lines and JSON structure
+# overhead.
 TARGET_MAP_DATA_BYTES = 4200
 
 
 def fit_map_data(raw_ways, target_bytes=TARGET_MAP_DATA_BYTES):
     """
     Finds the largest subset of raw_ways (and the simplification tolerance
-    to use) whose *combined* polyline encoding fits under target_bytes --
-    combined because the budget applies to the total payload regardless of
-    how the surviving ways later get split into separate red/yellow
-    strings by is_shared (see run_daily_update). This function doesn't do
-    that split or the final encoding itself; it just decides what survives.
+    to use) whose combined polyline encoding fits under target_bytes. This
+    function doesn't do the final encoding itself; it just decides what
+    survives.
 
     First tries increasingly aggressive Douglas-Peucker simplification
     (MIN_DELTA_STEPS), which is capped well short of the tolerance that
     visibly mangles line shape. If the network still doesn't fit at the
     safest max tolerance, switches strategy entirely: instead of
-    simplifying further, it drops ways one at a time -- at that same
-    fixed, safe tolerance -- until it fits. This keeps every *remaining*
-    line looking like a real line, trading completeness for shape rather
-    than trading shape for completeness.
-
-    On very large networks (e.g. NYC's subway), dropping can mean removing
-    the majority of ways, which risks leaving a scatter of disconnected
-    fragments rather than a recognizable network. To keep what's left
-    coherent, drop priority favors keeping shared track (is_shared, the
-    physically-shared trunk corridors used by multiple lines -- the "spine"
-    of the system) over individual/branch track, and only within each of
-    those two groups does length break ties, shortest dropped first.
+    simplifying further, it drops the shortest way geometries (usually
+    spurs/branches) one at a time -- at that same fixed, safe tolerance --
+    until it fits. This keeps every *remaining* line looking like a real
+    line, trading completeness for shape rather than trading shape for
+    completeness.
 
     Returns (final_ways, min_delta_used, ways_dropped).
     """
@@ -632,23 +610,18 @@ def fit_map_data(raw_ways, target_bytes=TARGET_MAP_DATA_BYTES):
             return raw_ways, min_delta, 0
 
     max_delta = MIN_DELTA_STEPS[-1]
-    # Sort so shared/trunk track and longer ways come first; dropping from
-    # the end (shortest cutoff first) removes individual/branch track and
-    # short ways before ever touching shared track.
-    ways_by_priority = sorted(
-        raw_ways, key=lambda w: (not w["is_shared"], -w["length_km"])
-    )
-    for cutoff in range(len(ways_by_priority) - 1, 0, -1):
-        subset = ways_by_priority[:cutoff]
+    ways_by_length = sorted(raw_ways, key=lambda w: w["length_km"], reverse=True)
+    for cutoff in range(len(ways_by_length) - 1, 0, -1):
+        subset = ways_by_length[:cutoff]
         encoded_string = ";".join(encode_ways(subset, max_delta))
         if len(encoded_string.encode("utf-8")) <= target_bytes:
-            return subset, max_delta, len(ways_by_priority) - cutoff
+            return subset, max_delta, len(ways_by_length) - cutoff
 
     # Nothing got it under budget -- return the most-reduced attempt we
-    # have (the single highest-priority way). TRMNL will likely still
-    # reject it, but that's now a rare, loud edge case (visible in the
-    # printed payload size / error response) rather than a silent one.
-    return ways_by_priority[:1], max_delta, len(ways_by_priority) - 1
+    # have (the single longest way). TRMNL will likely still reject it,
+    # but that's now a rare, loud edge case (visible in the printed
+    # payload size / error response) rather than a silent one.
+    return ways_by_length[:1], max_delta, len(ways_by_length) - 1
 
 
 def run_daily_update():
@@ -665,18 +638,7 @@ def run_daily_update():
     if ways_dropped:
         print(f"Warning: dropped {ways_dropped} short way segment(s) to fit payload budget")
 
-    # Split the surviving ways by whether their physical track is used by
-    # more than one route relation -- shared track (map_data_shared) is
-    # drawn in yellow on top of individual track (map_data) in red. Both
-    # are encoded at the same min_delta_used so the combined size still
-    # matches what fit_map_data() already confirmed fits the budget.
-    individual_ways = [w for w in final_ways if not w["is_shared"]]
-    shared_ways = [w for w in final_ways if w["is_shared"]]
-    map_data = ";".join(encode_ways(individual_ways, min_delta_used))
-    map_data_shared = ";".join(encode_ways(shared_ways, min_delta_used))
-
-    if shared_ways:
-        print(f"{len(shared_ways)} way segment(s) are shared by multiple lines (drawn in yellow)")
+    map_data = ";".join(encode_ways(final_ways, min_delta_used))
 
     payload = {
         "merge_variables": {
@@ -685,7 +647,6 @@ def run_daily_update():
             "lat": city_data["center"][1],
             "zoom": city_data["zoom"],
             "map_data": map_data,
-            "map_data_shared": map_data_shared,
             "total_lines": total_lines,
         }
     }
