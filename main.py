@@ -290,21 +290,102 @@ def douglas_peucker(points, epsilon):
     return [points[i] for i in range(len(points)) if keep[i]]
 
 
-def collect_transit_ways(overpass_data):
+def _clip_segment_to_bbox(p0, p1, bbox):
+    """Liang-Barsky clip of one line segment against an axis-aligned bbox
+    [west, south, east, north]. Returns ((x0,y0), (x1,y1)) for the portion
+    of the segment inside the box, or None if none of it is inside."""
+    x0, y0 = p0
+    x1, y1 = p1
+    west, south, east, north = bbox
+    dx = x1 - x0
+    dy = y1 - y0
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, x0 - west), (dx, east - x0), (-dy, y0 - south), (dy, north - y0)):
+        if p == 0:
+            if q < 0:
+                return None  # segment parallel to this edge and outside it
+        else:
+            t = q / p
+            if p < 0:
+                if t > t1:
+                    return None
+                if t > t0:
+                    t0 = t
+            else:
+                if t < t0:
+                    return None
+                if t < t1:
+                    t1 = t
+    if t0 > t1:
+        return None
+    return (x0 + t0 * dx, y0 + t0 * dy), (x0 + t1 * dx, y0 + t1 * dy)
+
+
+def clip_line_to_bbox(coords, bbox, pad_ratio=0.25):
     """
-    Extracts deduped way geometries plus summary stats (total km, unique
-    line count) from a raw Overpass response. Geometry is returned
-    unsimplified/unencoded, along with each way's own length -- fit_map_data()
-    uses length to decide what to drop if the network doesn't fit the byte
-    budget even at the safest simplification tolerance.
+    Clips a way's coordinate list against the city bbox, dropping the
+    portions that fall outside it. Overpass's relation bbox filter only
+    guarantees *some part* of a route relation intersects the query box --
+    regional/mainline routes that merely clip a corner of the city can come
+    back with geometry stretching for hundreds of km outside it, all of
+    which would otherwise get simplified/encoded/sent for no visual benefit
+    (it's off-screen).
+
+    Returns a list of contiguous coordinate runs (a way that exits and
+    re-enters the box becomes multiple runs, since there's no line to draw
+    across the gap). Each run has >= 2 points, or the list is empty.
+
+    The box is padded by pad_ratio (default 25% of its width/height) before
+    clipping, since the actual rendered viewport (MapLibre center+zoom) can
+    show a bit more than the nominal query bbox depending on device aspect
+    ratio -- better to keep a little extra geometry than to visibly clip a
+    line that's still on screen.
+    """
+    west, south, east, north = bbox
+    pad_lon = (east - west) * pad_ratio
+    pad_lat = (north - south) * pad_ratio
+    padded_bbox = [west - pad_lon, south - pad_lat, east + pad_lon, north + pad_lat]
+
+    runs = []
+    current = []
+    for i in range(len(coords) - 1):
+        clipped = _clip_segment_to_bbox(coords[i], coords[i + 1], padded_bbox)
+        if clipped is None:
+            if len(current) >= 2:
+                runs.append(current)
+            current = []
+            continue
+
+        (cx0, cy0), (cx1, cy1) = clipped
+        if not current or abs(current[-1][0] - cx0) > 1e-9 or abs(current[-1][1] - cy0) > 1e-9:
+            if len(current) >= 2:
+                runs.append(current)
+            current = [[cx0, cy0]]
+        current.append([cx1, cy1])
+
+    if len(current) >= 2:
+        runs.append(current)
+    return runs
+
+
+def collect_transit_ways(overpass_data, bbox):
+    """
+    Extracts deduped, bbox-clipped way geometries plus the unique line count
+    from a raw Overpass response. Geometry is returned unsimplified/
+    unencoded, along with each run's own length -- fit_map_data() uses that
+    length to decide what to drop if the network doesn't fit the byte
+    budget even at the safest simplification tolerance (total km is not
+    tracked here since it's no longer part of the displayed payload).
 
     Ways are deduped by OSM way id (seen_way_ids) because multiple transit
     lines often share physical track, and without dedup that shared track
-    would be counted and drawn multiple times.
+    would be counted and drawn multiple times. Each way is then clipped to
+    the city bbox (see clip_line_to_bbox) so geometry outside the visible
+    area never reaches simplification/encoding -- one way can yield zero,
+    one, or several runs.
     """
     raw_ways = []  # [{"coords": [[lon, lat], ...], "length_km": float}, ...]
     seen_way_ids = set()
-    total_km = 0.0
     unique_lines = set()
 
     for element in overpass_data.get("elements", []):
@@ -328,17 +409,16 @@ def collect_transit_ways(overpass_data):
             if len(coords) < 2:
                 continue
 
-            way_km = 0.0
-            for i in range(len(coords) - 1):
-                way_km += haversine_distance(
-                    coords[i][0], coords[i][1],
-                    coords[i + 1][0], coords[i + 1][1]
-                )
-            total_km += way_km
+            for run in clip_line_to_bbox(coords, bbox):
+                run_km = 0.0
+                for i in range(len(run) - 1):
+                    run_km += haversine_distance(
+                        run[i][0], run[i][1],
+                        run[i + 1][0], run[i + 1][1]
+                    )
+                raw_ways.append({"coords": run, "length_km": run_km})
 
-            raw_ways.append({"coords": coords, "length_km": way_km})
-
-    return raw_ways, round(total_km, 1), len(unique_lines)
+    return raw_ways, len(unique_lines)
 
 
 def encode_ways(raw_ways, min_delta, center, precision=5):
@@ -383,7 +463,7 @@ MIN_DELTA_STEPS = [0.0015, 0.0025, 0.004, 0.006]
 
 # Budget for the encoded map_data string alone, not the whole JSON payload.
 # TRMNL's free-tier limit is ~5KB for the whole payload; this leaves
-# headroom for city_name/lon/lat/zoom/total_km/total_lines and JSON
+# headroom for city_name/lon/lat/zoom/total_lines and JSON
 # structure overhead.
 TARGET_MAP_DATA_BYTES = 4200
 
@@ -433,7 +513,7 @@ def run_daily_update():
     print("Fetching OSM transit data...")
 
     overpass_data = get_transit_data(city_data["bbox"], city_data["route_tags"])
-    raw_ways, total_km, total_lines = collect_transit_ways(overpass_data)
+    raw_ways, total_lines = collect_transit_ways(overpass_data, city_data["bbox"])
     encoded_string, min_delta_used, ways_dropped = fit_map_data(raw_ways, city_data["center"])
 
     if min_delta_used != MIN_DELTA_STEPS[0]:
@@ -448,7 +528,6 @@ def run_daily_update():
             "lat": city_data["center"][1],
             "zoom": city_data["zoom"],
             "map_data": encoded_string,
-            "total_km": total_km,
             "total_lines": total_lines,
         }
     }
@@ -458,7 +537,7 @@ def run_daily_update():
     headers = {"Content-Type": "application/json"}
     resp = requests.post(TRMNL_WEBHOOK_URL, data=body, headers=headers)
 
-    print(f"TRMNL Updated: {city_name} | {total_lines} lines | {total_km} km")
+    print(f"TRMNL Updated: {city_name} | {total_lines} lines")
     print(f"Status {resp.status_code}, payload size {len(body.encode('utf-8'))} bytes")
 
     if resp.status_code != 200:
