@@ -259,11 +259,10 @@ def _perpendicular_distance(pt, line_start, line_end):
 
 def douglas_peucker(points, epsilon):
     """
-    Real Douglas-Peucker line simplification (perpendicular-distance based),
-    replacing the old crude "skip points within min_delta of the last kept
-    point" heuristic. Iterative (stack-based) rather than recursive so it
-    doesn't blow Python's recursion limit on very long, point-dense ways.
-    epsilon is in degrees, same unit the old min_delta used.
+    Douglas-Peucker line simplification (perpendicular-distance based).
+    Iterative (stack-based) rather than recursive so it doesn't blow
+    Python's recursion limit on very long, point-dense ways. epsilon is in
+    degrees.
     """
     if len(points) < 3:
         return points
@@ -295,14 +294,15 @@ def collect_transit_ways(overpass_data):
     """
     Extracts deduped way geometries plus summary stats (total km, unique
     line count) from a raw Overpass response. Geometry is returned
-    unsimplified/unencoded -- fit_map_data() handles turning it into a
-    payload that fits TRMNL's size limit.
+    unsimplified/unencoded, along with each way's own length -- fit_map_data()
+    uses length to decide what to drop if the network doesn't fit the byte
+    budget even at the safest simplification tolerance.
 
     Ways are deduped by OSM way id (seen_way_ids) because multiple transit
     lines often share physical track, and without dedup that shared track
     would be counted and drawn multiple times.
     """
-    raw_ways = []
+    raw_ways = []  # [{"coords": [[lon, lat], ...], "length_km": float}, ...]
     seen_way_ids = set()
     total_km = 0.0
     unique_lines = set()
@@ -328,33 +328,58 @@ def collect_transit_ways(overpass_data):
             if len(coords) < 2:
                 continue
 
+            way_km = 0.0
             for i in range(len(coords) - 1):
-                total_km += haversine_distance(
+                way_km += haversine_distance(
                     coords[i][0], coords[i][1],
                     coords[i + 1][0], coords[i + 1][1]
                 )
+            total_km += way_km
 
-            raw_ways.append(coords)
+            raw_ways.append({"coords": coords, "length_km": way_km})
 
     return raw_ways, round(total_km, 1), len(unique_lines)
 
 
-def encode_ways(raw_ways, min_delta, precision=5):
-    """Simplify (Douglas-Peucker) then polyline-encode a set of way
-    geometries at a given simplification tolerance."""
+def encode_ways(raw_ways, min_delta, center, precision=5):
+    """
+    Simplify (Douglas-Peucker) then polyline-encode a set of way geometries
+    at a given simplification tolerance.
+
+    Coordinates are encoded as an offset from the city's center point
+    (center = [lon, lat]) rather than as absolute WGS84 coordinates. A
+    polyline's very first point is encoded as a delta from (0, 0), so
+    without this offset every one of a city's dozens of ways would pay the
+    full cost of an absolute-magnitude coordinate (~8-10 characters) just
+    for its first point. Offsetting by the center keeps that first-point
+    delta small, freeing up real budget for keeping more points (i.e. less
+    aggressive simplification) instead.
+
+    This requires a matching change on the decode side: transit_map.html
+    adds CENTER back to every decoded point after calling
+    TRMNLMaps.decodePolyline(). Don't change this offset convention without
+    updating that file too.
+    """
+    center_lon, center_lat = center
     encoded = []
-    for coords in raw_ways:
-        simplified = douglas_peucker(coords, min_delta)
+    for way in raw_ways:
+        simplified = douglas_peucker(way["coords"], min_delta)
         if len(simplified) < 2:
             continue
-        lat_lon_pairs = [(pt[1], pt[0]) for pt in simplified]
+        lat_lon_pairs = [
+            (pt[1] - center_lat, pt[0] - center_lon) for pt in simplified
+        ]
         encoded.append(encode_polyline(lat_lon_pairs, precision=precision))
     return encoded
 
 
-# Simplification tolerances to try, in increasing order (degrees). Each step
-# roughly doubles how aggressively near-straight detail gets dropped.
-MIN_DELTA_STEPS = [0.0015, 0.0025, 0.004, 0.006, 0.009, 0.013, 0.02, 0.03]
+# Simplification tolerances to try, in increasing order (degrees). Capped at
+# 0.006 (~650m) -- well below the point where Douglas-Peucker starts
+# collapsing lines into a handful of straight chords (the "everything looks
+# triangulated" failure mode seen on dense networks like Copenhagen's radial
+# S-train system). If the network still doesn't fit at this tolerance,
+# fit_map_data() drops whole ways instead of simplifying further.
+MIN_DELTA_STEPS = [0.0015, 0.0025, 0.004, 0.006]
 
 # Budget for the encoded map_data string alone, not the whole JSON payload.
 # TRMNL's free-tier limit is ~5KB for the whole payload; this leaves
@@ -363,39 +388,43 @@ MIN_DELTA_STEPS = [0.0015, 0.0025, 0.004, 0.006, 0.009, 0.013, 0.02, 0.03]
 TARGET_MAP_DATA_BYTES = 4200
 
 
-def fit_map_data(raw_ways, target_bytes=TARGET_MAP_DATA_BYTES):
+def fit_map_data(raw_ways, center, target_bytes=TARGET_MAP_DATA_BYTES):
     """
     Finds an encoded map_data string that fits under target_bytes.
 
     First tries increasingly aggressive Douglas-Peucker simplification
-    (MIN_DELTA_STEPS). If even the coarsest tolerance still doesn't fit,
-    falls back to dropping the shortest way geometries (by point count, a
-    cheap proxy for length -- usually short tram/bus spurs) one at a time
-    until it does.
+    (MIN_DELTA_STEPS), which is capped well short of the tolerance that
+    visibly mangles line shape. If the network still doesn't fit at the
+    safest max tolerance, switches strategy entirely: instead of
+    simplifying further, it drops the shortest way geometries (usually
+    spurs/branches) one at a time -- at that same fixed, safe tolerance --
+    until it fits. This keeps every *remaining* line looking like a real
+    line, trading completeness for shape rather than trading shape for
+    completeness.
 
     Returns (encoded_string, min_delta_used, ways_dropped).
     """
     encoded_string = ""
     for min_delta in MIN_DELTA_STEPS:
-        encoded_lines = encode_ways(raw_ways, min_delta)
+        encoded_lines = encode_ways(raw_ways, min_delta, center)
         encoded_string = ";".join(encoded_lines)
         if len(encoded_string.encode("utf-8")) <= target_bytes:
             return encoded_string, min_delta, 0
 
     max_delta = MIN_DELTA_STEPS[-1]
-    ways_by_size = sorted(raw_ways, key=len, reverse=True)
-    for cutoff in range(len(ways_by_size) - 1, 0, -1):
-        subset = ways_by_size[:cutoff]
-        encoded_lines = encode_ways(subset, max_delta)
+    ways_by_length = sorted(raw_ways, key=lambda w: w["length_km"], reverse=True)
+    for cutoff in range(len(ways_by_length) - 1, 0, -1):
+        subset = ways_by_length[:cutoff]
+        encoded_lines = encode_ways(subset, max_delta, center)
         encoded_string = ";".join(encoded_lines)
         if len(encoded_string.encode("utf-8")) <= target_bytes:
-            return encoded_string, max_delta, len(ways_by_size) - cutoff
+            return encoded_string, max_delta, len(ways_by_length) - cutoff
 
     # Nothing got it under budget -- return the most-reduced attempt we
     # have. TRMNL will likely still reject it, but that's now a rare, loud
     # edge case (visible in the printed payload size / error response)
     # rather than a silent one.
-    return encoded_string, max_delta, len(ways_by_size) - 1
+    return encoded_string, max_delta, len(ways_by_length) - 1
 
 
 def run_daily_update():
@@ -405,7 +434,7 @@ def run_daily_update():
 
     overpass_data = get_transit_data(city_data["bbox"], city_data["route_tags"])
     raw_ways, total_km, total_lines = collect_transit_ways(overpass_data)
-    encoded_string, min_delta_used, ways_dropped = fit_map_data(raw_ways)
+    encoded_string, min_delta_used, ways_dropped = fit_map_data(raw_ways, city_data["center"])
 
     if min_delta_used != MIN_DELTA_STEPS[0]:
         print(f"Simplification tolerance raised to {min_delta_used} to fit payload budget")
