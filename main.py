@@ -421,34 +421,22 @@ def collect_transit_ways(overpass_data, bbox):
     return raw_ways, len(unique_lines)
 
 
-def encode_ways(raw_ways, min_delta, center, precision=5):
+def encode_ways(raw_ways, min_delta, precision=5):
     """
     Simplify (Douglas-Peucker) then polyline-encode a set of way geometries
     at a given simplification tolerance.
 
-    Coordinates are encoded as an offset from the city's center point
-    (center = [lon, lat]) rather than as absolute WGS84 coordinates. A
-    polyline's very first point is encoded as a delta from (0, 0), so
-    without this offset every one of a city's dozens of ways would pay the
-    full cost of an absolute-magnitude coordinate (~8-10 characters) just
-    for its first point. Offsetting by the center keeps that first-point
-    delta small, freeing up real budget for keeping more points (i.e. less
-    aggressive simplification) instead.
-
-    This requires a matching change on the decode side: transit_map.html
-    adds CENTER back to every decoded point after calling
-    TRMNLMaps.decodePolyline(). Don't change this offset convention without
-    updating that file too.
+    Coordinates are encoded as standard absolute WGS84 lat/lng pairs, at the
+    standard Google polyline precision (5), so the plugin side can decode
+    them with a stock, unmodified TRMNLMaps.decodePolyline() call -- no
+    center-offset compensation needed on the HTML side.
     """
-    center_lon, center_lat = center
     encoded = []
     for way in raw_ways:
         simplified = douglas_peucker(way["coords"], min_delta)
         if len(simplified) < 2:
             continue
-        lat_lon_pairs = [
-            (pt[1] - center_lat, pt[0] - center_lon) for pt in simplified
-        ]
+        lat_lon_pairs = [(pt[1], pt[0]) for pt in simplified]
         encoded.append(encode_polyline(lat_lon_pairs, precision=precision))
     return encoded
 
@@ -468,7 +456,7 @@ MIN_DELTA_STEPS = [0.0015, 0.0025, 0.004, 0.006]
 TARGET_MAP_DATA_BYTES = 4200
 
 
-def fit_map_data(raw_ways, center, target_bytes=TARGET_MAP_DATA_BYTES):
+def fit_map_data(raw_ways, target_bytes=TARGET_MAP_DATA_BYTES):
     """
     Finds an encoded map_data string that fits under target_bytes.
 
@@ -486,7 +474,7 @@ def fit_map_data(raw_ways, center, target_bytes=TARGET_MAP_DATA_BYTES):
     """
     encoded_string = ""
     for min_delta in MIN_DELTA_STEPS:
-        encoded_lines = encode_ways(raw_ways, min_delta, center)
+        encoded_lines = encode_ways(raw_ways, min_delta)
         encoded_string = ";".join(encoded_lines)
         if len(encoded_string.encode("utf-8")) <= target_bytes:
             return encoded_string, min_delta, 0
@@ -495,7 +483,7 @@ def fit_map_data(raw_ways, center, target_bytes=TARGET_MAP_DATA_BYTES):
     ways_by_length = sorted(raw_ways, key=lambda w: w["length_km"], reverse=True)
     for cutoff in range(len(ways_by_length) - 1, 0, -1):
         subset = ways_by_length[:cutoff]
-        encoded_lines = encode_ways(subset, max_delta, center)
+        encoded_lines = encode_ways(subset, max_delta)
         encoded_string = ";".join(encoded_lines)
         if len(encoded_string.encode("utf-8")) <= target_bytes:
             return encoded_string, max_delta, len(ways_by_length) - cutoff
@@ -514,7 +502,7 @@ def run_daily_update():
 
     overpass_data = get_transit_data(city_data["bbox"], city_data["route_tags"])
     raw_ways, total_lines = collect_transit_ways(overpass_data, city_data["bbox"])
-    encoded_string, min_delta_used, ways_dropped = fit_map_data(raw_ways, city_data["center"])
+    encoded_string, min_delta_used, ways_dropped = fit_map_data(raw_ways)
 
     if min_delta_used != MIN_DELTA_STEPS[0]:
         print(f"Simplification tolerance raised to {min_delta_used} to fit payload budget")
