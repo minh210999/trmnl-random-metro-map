@@ -321,6 +321,50 @@ def _clip_segment_to_bbox(p0, p1, bbox):
     return (x0 + t0 * dx, y0 + t0 * dy), (x0 + t1 * dx, y0 + t1 * dy)
 
 
+# Max plausible distance (km) between two *consecutive* geometry nodes of
+# the same OSM way. Overpass normally returns rail/tram way geometry with
+# nodes every few dozen to a few hundred meters; a gap far beyond that is
+# almost always a data glitch (a mis-digitized or misplaced node) rather
+# than a real stretch of track.
+MAX_NODE_GAP_KM = 1.5
+
+
+def split_on_large_gaps(coords, max_gap_km=MAX_NODE_GAP_KM):
+    """
+    Splits a way's coordinate list wherever two consecutive nodes are
+    implausibly far apart. This has to run *before* Douglas-Peucker
+    simplification, not after: DP specifically keeps whichever point
+    deviates most from its neighbors and discards the ones that agree with
+    it, which is exactly backwards for a single glitchy node -- it doesn't
+    get smoothed away, it gets preserved and everything around it gets
+    thinned out, leaving one long spurious straight line pointing at it.
+
+    Splitting the way here means a bad node just breaks its way into two
+    clean runs instead of producing a stray line cutting across the map.
+
+    Returns a list of coordinate runs, each internally within the gap
+    threshold (each run has >= 2 points, or the list is empty).
+    """
+    if len(coords) < 2:
+        return []
+
+    runs = []
+    current = [coords[0]]
+    for i in range(1, len(coords)):
+        gap_km = haversine_distance(
+            coords[i - 1][0], coords[i - 1][1], coords[i][0], coords[i][1]
+        )
+        if gap_km > max_gap_km:
+            if len(current) >= 2:
+                runs.append(current)
+            current = [coords[i]]
+        else:
+            current.append(coords[i])
+    if len(current) >= 2:
+        runs.append(current)
+    return runs
+
+
 def clip_line_to_bbox(coords, bbox, pad_ratio=0.25):
     """
     Clips a way's coordinate list against the city bbox, dropping the
@@ -377,15 +421,20 @@ def collect_transit_ways(overpass_data, bbox):
     budget even at the safest simplification tolerance (total km is not
     tracked here since it's no longer part of the displayed payload).
 
-    Ways are deduped by OSM way id (seen_way_ids) because multiple transit
-    lines often share physical track, and without dedup that shared track
-    would be counted and drawn multiple times. Each way is then clipped to
-    the city bbox (see clip_line_to_bbox) so geometry outside the visible
-    area never reaches simplification/encoding -- one way can yield zero,
-    one, or several runs.
+    A way is deduped to a single geometry (seen once, keyed by OSM way id)
+    but every relation that references it is tracked, so a way used by two
+    or more distinct route relations -- i.e. physical track shared by
+    multiple lines -- can be flagged via is_shared and drawn differently
+    (see run_daily_update, which splits the final way list into a red
+    "individual track" payload and a yellow "shared track" payload). Each
+    way is then split on any implausible node-to-node gap (see
+    split_on_large_gaps, which guards against isolated bad OSM data) and
+    clipped to the city bbox (see clip_line_to_bbox) so geometry outside
+    the visible area never reaches simplification/encoding -- one way can
+    yield zero, one, or several runs.
     """
-    raw_ways = []  # [{"coords": [[lon, lat], ...], "length_km": float}, ...]
-    seen_way_ids = set()
+    way_geometry = {}   # way_id -> [[lon, lat], ...], first-seen geometry only
+    way_relations = {}  # way_id -> set of relation ids that reference it
     unique_lines = set()
 
     for element in overpass_data.get("elements", []):
@@ -395,28 +444,34 @@ def collect_transit_ways(overpass_data, bbox):
         tags = element.get("tags", {})
         line_identifier = tags.get("ref") or tags.get("name") or str(element.get("id"))
         unique_lines.add(line_identifier)
+        relation_id = element.get("id")
 
         for member in element.get("members", []):
             if member.get("type") != "way" or "geometry" not in member:
                 continue
 
             way_id = member.get("ref")
-            if way_id in seen_way_ids:
-                continue
-            seen_way_ids.add(way_id)
+            if way_id not in way_geometry:
+                coords = [[pt["lon"], pt["lat"]] for pt in member["geometry"]]
+                if len(coords) < 2:
+                    continue
+                way_geometry[way_id] = coords
 
-            coords = [[pt["lon"], pt["lat"]] for pt in member["geometry"]]
-            if len(coords) < 2:
-                continue
+            way_relations.setdefault(way_id, set()).add(relation_id)
 
-            for run in clip_line_to_bbox(coords, bbox):
+    raw_ways = []  # [{"coords": [...], "length_km": float, "is_shared": bool}, ...]
+    for way_id, coords in way_geometry.items():
+        is_shared = len(way_relations.get(way_id, ())) > 1
+
+        for clean_run in split_on_large_gaps(coords):
+            for run in clip_line_to_bbox(clean_run, bbox):
                 run_km = 0.0
                 for i in range(len(run) - 1):
                     run_km += haversine_distance(
                         run[i][0], run[i][1],
                         run[i + 1][0], run[i + 1][1]
                     )
-                raw_ways.append({"coords": run, "length_km": run_km})
+                raw_ways.append({"coords": run, "length_km": run_km, "is_shared": is_shared})
 
     return raw_ways, len(unique_lines)
 
@@ -449,16 +504,21 @@ def encode_ways(raw_ways, min_delta, precision=5):
 # fit_map_data() drops whole ways instead of simplifying further.
 MIN_DELTA_STEPS = [0.0015, 0.0025, 0.004, 0.006]
 
-# Budget for the encoded map_data string alone, not the whole JSON payload.
-# TRMNL's free-tier limit is ~5KB for the whole payload; this leaves
-# headroom for city_name/lon/lat/zoom/total_lines and JSON
-# structure overhead.
+# Budget for the combined encoded route geometry (map_data + map_data_shared
+# together), not the whole JSON payload. TRMNL's free-tier limit is ~5KB for
+# the whole payload; this leaves headroom for city_name/lon/lat/zoom/
+# total_lines and JSON structure overhead.
 TARGET_MAP_DATA_BYTES = 4200
 
 
 def fit_map_data(raw_ways, target_bytes=TARGET_MAP_DATA_BYTES):
     """
-    Finds an encoded map_data string that fits under target_bytes.
+    Finds the largest subset of raw_ways (and the simplification tolerance
+    to use) whose *combined* polyline encoding fits under target_bytes --
+    combined because the budget applies to the total payload regardless of
+    how the surviving ways later get split into separate red/yellow
+    strings by is_shared (see run_daily_update). This function doesn't do
+    that split or the final encoding itself; it just decides what survives.
 
     First tries increasingly aggressive Douglas-Peucker simplification
     (MIN_DELTA_STEPS), which is capped well short of the tolerance that
@@ -470,29 +530,26 @@ def fit_map_data(raw_ways, target_bytes=TARGET_MAP_DATA_BYTES):
     line, trading completeness for shape rather than trading shape for
     completeness.
 
-    Returns (encoded_string, min_delta_used, ways_dropped).
+    Returns (final_ways, min_delta_used, ways_dropped).
     """
-    encoded_string = ""
     for min_delta in MIN_DELTA_STEPS:
-        encoded_lines = encode_ways(raw_ways, min_delta)
-        encoded_string = ";".join(encoded_lines)
+        encoded_string = ";".join(encode_ways(raw_ways, min_delta))
         if len(encoded_string.encode("utf-8")) <= target_bytes:
-            return encoded_string, min_delta, 0
+            return raw_ways, min_delta, 0
 
     max_delta = MIN_DELTA_STEPS[-1]
     ways_by_length = sorted(raw_ways, key=lambda w: w["length_km"], reverse=True)
     for cutoff in range(len(ways_by_length) - 1, 0, -1):
         subset = ways_by_length[:cutoff]
-        encoded_lines = encode_ways(subset, max_delta)
-        encoded_string = ";".join(encoded_lines)
+        encoded_string = ";".join(encode_ways(subset, max_delta))
         if len(encoded_string.encode("utf-8")) <= target_bytes:
-            return encoded_string, max_delta, len(ways_by_length) - cutoff
+            return subset, max_delta, len(ways_by_length) - cutoff
 
     # Nothing got it under budget -- return the most-reduced attempt we
-    # have. TRMNL will likely still reject it, but that's now a rare, loud
-    # edge case (visible in the printed payload size / error response)
-    # rather than a silent one.
-    return encoded_string, max_delta, len(ways_by_length) - 1
+    # have (the single longest way). TRMNL will likely still reject it,
+    # but that's now a rare, loud edge case (visible in the printed
+    # payload size / error response) rather than a silent one.
+    return ways_by_length[:1], max_delta, len(ways_by_length) - 1
 
 
 def run_daily_update():
@@ -502,12 +559,25 @@ def run_daily_update():
 
     overpass_data = get_transit_data(city_data["bbox"], city_data["route_tags"])
     raw_ways, total_lines = collect_transit_ways(overpass_data, city_data["bbox"])
-    encoded_string, min_delta_used, ways_dropped = fit_map_data(raw_ways)
+    final_ways, min_delta_used, ways_dropped = fit_map_data(raw_ways)
 
     if min_delta_used != MIN_DELTA_STEPS[0]:
         print(f"Simplification tolerance raised to {min_delta_used} to fit payload budget")
     if ways_dropped:
         print(f"Warning: dropped {ways_dropped} short way segment(s) to fit payload budget")
+
+    # Split the surviving ways by whether their physical track is used by
+    # more than one route relation -- shared track (map_data_shared) is
+    # drawn in yellow on top of individual track (map_data) in red. Both
+    # are encoded at the same min_delta_used so the combined size still
+    # matches what fit_map_data() already confirmed fits the budget.
+    individual_ways = [w for w in final_ways if not w["is_shared"]]
+    shared_ways = [w for w in final_ways if w["is_shared"]]
+    map_data = ";".join(encode_ways(individual_ways, min_delta_used))
+    map_data_shared = ";".join(encode_ways(shared_ways, min_delta_used))
+
+    if shared_ways:
+        print(f"{len(shared_ways)} way segment(s) are shared by multiple lines (drawn in yellow)")
 
     payload = {
         "merge_variables": {
@@ -515,7 +585,8 @@ def run_daily_update():
             "lon": city_data["center"][0],
             "lat": city_data["center"][1],
             "zoom": city_data["zoom"],
-            "map_data": encoded_string,
+            "map_data": map_data,
+            "map_data_shared": map_data_shared,
             "total_lines": total_lines,
         }
     }
