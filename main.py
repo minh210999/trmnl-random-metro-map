@@ -180,7 +180,7 @@ def get_transit_data(bbox, route_tags):
     tag_filter = "|".join(route_tags)
 
     query = f"""
-    [out:json][timeout:25];
+    [out:json][timeout:45];
     relation["route"~"^({tag_filter})$"]({south},{west},{north},{east});
     out geom;
     """
@@ -192,7 +192,7 @@ def get_transit_data(bbox, route_tags):
                 mirror_url,
                 data={"data": query},
                 headers=REQUEST_HEADERS,
-                timeout=30,
+                timeout=60,
             )
             resp.raise_for_status()
             return resp.json()
