@@ -3,8 +3,8 @@ name: Daily TRMNL Transit Map
 on:
   schedule:
     # Runs at 12:00 UTC (8:00 AM EST) every day
-    - cron: '0 1 * * *'
-    - cron: '0 9 * * *'
+    - cron: '06 1 * * *'
+    - cron: '41 10 * * *'
   workflow_dispatch: # Allows you to run it manually from the UI
 
 jobs:
