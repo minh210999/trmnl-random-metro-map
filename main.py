@@ -175,33 +175,61 @@ CITIES = {
 }
 
 
-def get_transit_data(bbox, route_tags):
+# How many times to loop through the full OVERPASS_MIRRORS list before
+# giving up. The public Overpass instances are shared, best-effort
+# community infrastructure; a burst of load can knock out all of them at
+# once for a few minutes, but that kind of overload is usually transient --
+# so it's worth waiting and trying the whole list again rather than failing
+# after a single pass.
+OVERPASS_MAX_PASSES = 3
+ 
+# Seconds to wait between passes, multiplied by the pass number just
+# finished (so 15s before pass 2, 30s before pass 3, ...) -- a longer
+# pause than the flat 2s used between individual mirrors within a pass,
+# since this is meant to give real recovery time, not just avoid hammering
+# a server that's mid-response.
+OVERPASS_PASS_BACKOFF_SECONDS = 15
+ 
+ 
+def get_transit_data(bbox, route_tags, max_passes=OVERPASS_MAX_PASSES):
     west, south, east, north = bbox
     tag_filter = "|".join(route_tags)
-
+ 
     query = f"""
-    [out:json][timeout:45];
+    [out:json][timeout:25];
     relation["route"~"^({tag_filter})$"]({south},{west},{north},{east});
     out geom;
     """
-
+ 
     last_error = None
-    for mirror_url in OVERPASS_MIRRORS:
-        try:
-            resp = requests.post(
-                mirror_url,
-                data={"data": query},
-                headers=REQUEST_HEADERS,
-                timeout=60,
+    for pass_num in range(1, max_passes + 1):
+        for mirror_url in OVERPASS_MIRRORS:
+            try:
+                resp = requests.post(
+                    mirror_url,
+                    data={"data": query},
+                    headers=REQUEST_HEADERS,
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                return resp.json()
+            except requests.exceptions.RequestException as exc:
+                print(f"Overpass mirror failed ({mirror_url}): {exc}")
+                last_error = exc
+                time.sleep(2)
+ 
+        if pass_num < max_passes:
+            backoff = OVERPASS_PASS_BACKOFF_SECONDS * pass_num
+            print(
+                f"All mirrors failed on pass {pass_num}/{max_passes}; "
+                f"waiting {backoff}s before retrying the full list..."
             )
-            resp.raise_for_status()
-            return resp.json()
-        except requests.exceptions.RequestException as exc:
-            print(f"Overpass mirror failed ({mirror_url}): {exc}")
-            last_error = exc
-            time.sleep(2)
+            time.sleep(backoff)
+ 
+    raise RuntimeError(
+        f"All Overpass mirrors failed after {max_passes} pass(es). Last error: {last_error}"
+    )
 
-    raise RuntimeError(f"All Overpass mirrors failed. Last error: {last_error}")
 
 
 def haversine_distance(lon1, lat1, lon2, lat2):
